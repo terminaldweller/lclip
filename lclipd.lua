@@ -10,6 +10,38 @@ local argparse = require("argparse")
 local sys_stat = require("posix.sys.stat")
 local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
+local sqlite3 = require("lsqlite3")
+
+local sql_create_table = [=[
+create table if not exists lclipd (
+    id integer primary key autoincrement,
+    content text unique,
+    dateAdded integer,
+);
+]=]
+
+-- TODO
+local sql_trigger = [=[
+create trigger t_bi_prune before insert on t
+begin
+    delete from t
+    where ID = (
+        select ID
+        from t as o
+        where (select count(ID) from t where GroupID == o.GroupID) > 1
+        and Ack != 1
+        order by ID
+        limit 1
+    )
+    and (
+        select count(ID)
+        from t
+    ) >= 6;
+]=]
+
+local sql_insert = [=[
+insert into lclipd (,%s,unixepoch());
+]=]
 
 --- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 local function default_luarocks_modules()
@@ -79,7 +111,7 @@ local function check_clip_hist_perms(clip_hist)
     end
 end
 
---- Checks to make sure there the pid file for clipd does not exist.
+--- Checks to make sure that the pid file for clipd does not exist.
 local function check_pid_file()
     local f = sys_stat.stat("/var/run/clipd.pid")
     if f ~= nil then
@@ -102,6 +134,40 @@ end
 
 -- TODO- implement me
 local function remove_pid_file() end
+
+--- Get the clipboard content from X or wayland.
+local function get_clipboard()
+    local wait_for_event_x = io.popen("clipnotify")
+    local handle_x = io.popen("xsel -ob")
+    local last_clip_entry_x = handle_x:read("*a")
+
+    local wait_for_event_w = io.popen("clipnotify")
+    local handle_w = io.popen("xsel -ob")
+    local last_clip_entry_w = handle_w:read("*a")
+
+    if last_clip_entry_x ~= "" then
+        return last_clip_entry_x
+    else
+        return last_clip_entry_w
+    end
+end
+
+--- Get the sqlite DB handle.
+local function get_sqlite_handle()
+    local tmp_db_name = "/tmp/" ..
+                            io.popen(
+                                "tr -dc A-Za-z0-9 </dev/urandom | head -c 13"):read(
+                                "*a")
+    log_to_syslog(tmp_db_name, posix_syslog.LOG_INFO)
+    local clipDB = sqlite3.open(tmp_db_name,
+                                sqlite3.OPEN_READWRITE + sqlite3.OPEN_CREATE)
+    if clipDB == nil then
+        log_to_syslog("could not open the database")
+        os.exit(1)
+    end
+
+    return clipDB
+end
 
 --- The clipboard's main loop
 -- @param clip_hist path to the clip history file
