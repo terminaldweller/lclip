@@ -11,6 +11,7 @@ local sys_stat = require("posix.sys.stat")
 local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 
+--- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 local function default_luarocks_modules()
     local luarocks_handle = io.popen("luarocks-5.3 path --bin")
     local path_b = false
@@ -39,6 +40,9 @@ parser:option("-s --hist_size", "history file size", 200)
 parser:option("-f --hist_file", "history file location",
               "/home/devi/.clip_history")
 
+--- Log the given string to syslog with the given priority.
+-- @param log_str the string passed to the logging facility
+-- @param log_priority the priority of the log string
 local function log_to_syslog(log_str, log_priority)
     posix_syslog.openlog("clipd",
                          posix_syslog.LOG_NDELAY | posix_syslog.LOG_PID,
@@ -47,38 +51,35 @@ local function log_to_syslog(log_str, log_priority)
     posix_syslog.closelog()
 end
 
+--- Checks to make sure the cliphistory file's permission is 0600.
+-- @param clip_hist the history file's path
 local function check_clip_hist_perms(clip_hist)
     local uid = unistd.getuid()
     local gid = unistd.getgid()
     for k, v in pairs(sys_stat.stat(clip_hist)) do
-        if k == "st_uid" then
-            if v ~= uid then
-                log_to_syslog(
-                    "clipboard history file owned by uid other than the clipd uid",
-                    posix_syslog.LOG_CRIT)
-                os.exit(1)
-            end
+        if k == "st_uid" and v ~= uid then
+            log_to_syslog(
+                "clipboard history file owned by uid other than the clipd uid",
+                posix_syslog.LOG_CRIT)
+            os.exit(1)
         end
-        if k == "st_gid" then
-            if v ~= gid then
-                log_to_syslog(
-                    "clipboard history file owned by gid other than the clipd gid",
-                    posix_syslog.LOG_CRIT)
-                os.exit(1)
-            end
+        if k == "st_gid" and v ~= gid then
+            log_to_syslog(
+                "clipboard history file owned by gid other than the clipd gid",
+                posix_syslog.LOG_CRIT)
+            os.exit(1)
         end
-        if k == "st_mode" then
-            if v and (sys_stat.S_IRUSR or sys_stat.S_IWUSR) ~=
-                (sys_stat.S_IRUSR or sys_stat.S_IWUSR) then
-                log_to_syslog(
-                    "file permissions are too open. they need to be 0600.",
-                    posix_syslog.LOG_CRIT)
-                os.exit(1)
-            end
+        if k == "st_mode" and v and (sys_stat.S_IRUSR or sys_stat.S_IWUSR) ~=
+            (sys_stat.S_IRUSR or sys_stat.S_IWUSR) then
+            log_to_syslog(
+                "file permissions are too open. they need to be 0600.",
+                posix_syslog.LOG_CRIT)
+            os.exit(1)
         end
     end
 end
 
+--- Checks to make sure there the pid file for clipd does not exist.
 local function check_pid_file()
     local f = sys_stat.stat("/var/run/clipd.pid")
     if f ~= nil then
@@ -88,6 +89,8 @@ local function check_pid_file()
 end
 
 -- FIXME- we cant write to /var/run since we are running as non-root user
+--- Writes the pidfile to we can later check to make sure this is the only
+-- instance running.
 local function write_pid_file()
     local f = io.open("/var/run/clipd.pid", "w")
     if f == nil then
@@ -97,8 +100,12 @@ local function write_pid_file()
     f.write(unistd.getpid())
 end
 
+-- TODO- implement me
 local function remove_pid_file() end
 
+--- The clipboard's main loop
+-- @param clip_hist path to the clip history file
+-- @param clip_hist_size number of entries limit for the clip history file
 local function loop(clip_hist, clip_hist_size)
     local clips_table = {}
     local hist_current_count = 0
@@ -144,6 +151,7 @@ local function loop(clip_hist, clip_hist_size)
     end
 end
 
+--- The entry point
 local function main()
     signal.signal(signal.SIGINT, function(signum) os.exit(128 + signum) end)
     local args = parser:parse()
