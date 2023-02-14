@@ -15,32 +15,31 @@ local sqlite3 = require("lsqlite3")
 local sql_create_table = [=[
 create table if not exists lclipd (
     id integer primary key autoincrement,
-    content text unique,
-    dateAdded integer,
+    content text unique not null,
+    dateAdded integer not null,
 );
 ]=]
 
 -- TODO
 local sql_trigger = [=[
-create trigger t_bi_prune before insert on t
+create trigger t_bi_prune before insert on lclipd
 begin
-    delete from t
-    where ID = (
-        select ID
-        from t as o
-        where (select count(ID) from t where GroupID == o.GroupID) > 1
-        and Ack != 1
-        order by ID
+    delete from lclipd
+    where id = (
+        select id
+        from lclipd as o
+        where (select count(id) from lclipd where content == o.content) > 1
+        order by id
         limit 1
     )
     and (
-        select count(ID)
-        from t
-    ) >= 6;
+        select count(id)
+        from lclipd
+    ) >= %d;
 ]=]
 
 local sql_insert = [=[
-insert into lclipd (,%s,unixepoch());
+insert into lclipd (, %s, unixepoch());
 ]=]
 
 --- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
@@ -83,34 +82,6 @@ local function log_to_syslog(log_str, log_priority)
     posix_syslog.closelog()
 end
 
---- Checks to make sure the cliphistory file's permission is 0600.
--- @param clip_hist the history file's path
-local function check_clip_hist_perms(clip_hist)
-    local uid = unistd.getuid()
-    local gid = unistd.getgid()
-    for k, v in pairs(sys_stat.stat(clip_hist)) do
-        if k == "st_uid" and v ~= uid then
-            log_to_syslog(
-                "clipboard history file owned by uid other than the clipd uid",
-                posix_syslog.LOG_CRIT)
-            os.exit(1)
-        end
-        if k == "st_gid" and v ~= gid then
-            log_to_syslog(
-                "clipboard history file owned by gid other than the clipd gid",
-                posix_syslog.LOG_CRIT)
-            os.exit(1)
-        end
-        if k == "st_mode" and v and (sys_stat.S_IRUSR or sys_stat.S_IWUSR) ~=
-            (sys_stat.S_IRUSR or sys_stat.S_IWUSR) then
-            log_to_syslog(
-                "file permissions are too open. they need to be 0600.",
-                posix_syslog.LOG_CRIT)
-            os.exit(1)
-        end
-    end
-end
-
 --- Checks to make sure that the pid file for clipd does not exist.
 local function check_pid_file()
     local f = sys_stat.stat("/var/run/clipd.pid")
@@ -136,13 +107,13 @@ end
 local function remove_pid_file() end
 
 --- Get the clipboard content from X or wayland.
-local function get_clipboard()
+local function get_clipboard_content()
     local wait_for_event_x = io.popen("clipnotify")
     local handle_x = io.popen("xsel -ob")
     local last_clip_entry_x = handle_x:read("*a")
 
     local wait_for_event_w = io.popen("clipnotify")
-    local handle_w = io.popen("xsel -ob")
+    local handle_w = io.popen("wl-paste")
     local last_clip_entry_w = handle_w:read("*a")
 
     if last_clip_entry_x ~= "" then
@@ -173,46 +144,18 @@ end
 -- @param clip_hist path to the clip history file
 -- @param clip_hist_size number of entries limit for the clip history file
 local function loop(clip_hist, clip_hist_size)
-    local clips_table = {}
-    local hist_current_count = 0
-
-    local hist_file = io.open(clip_hist, "r")
-    if hist_file ~= nil then
-        for line in hist_file:lines() do
-            if line ~= "\n" and line ~= "" and line ~= "\r\n" and line ~= " " then
-                clips_table[line] = true
-                hist_current_count = hist_current_count + 1
-            end
-        end
-    end
-    hist_file:close()
+    local sqlite_handle = get_sqlite_handle()
+    sqlite_handle:exec(sql_create_table)
+    sqlite_handle:exec(sql_trigger)
 
     while true do
         local wait_for_event = io.popen("clipnotify")
         local handle = io.popen("xsel -ob")
         local last_clip_entry = handle:read("*a")
 
-        if last_clip_entry[-1] == "\n" then
-            clips_table[string.sub(last_clip_entry, 0,
-                                   string.len(last_clip_entry))] = true
-        else
-            clips_table[last_clip_entry] = true;
-        end
-        hist_current_count = hist_current_count + 1
+        local clip_content = get_clipboard_content()
+        sqlite_handle:exec(sql_insert)
 
-        if hist_current_count >= tonumber(clip_hist_size) then
-            table.remove(clips_table, 1)
-            hist_current_count = hist_current_count - 1
-        end
-
-        hist_file = io.open(clip_hist, "w")
-        for k, _ in pairs(clips_table) do
-            if clips_table[k] then hist_file:write(trim(k) .. "\n") end
-        end
-        hist_file:close()
-
-        wait_for_event:close()
-        handle:close()
         sleep(.2)
     end
 end
@@ -221,7 +164,6 @@ end
 local function main()
     signal.signal(signal.SIGINT, function(signum) os.exit(128 + signum) end)
     local args = parser:parse()
-    check_clip_hist_perms(args["hist_file"])
     check_pid_file()
     -- write_pid_file()
     local status, err = pcall(loop(args["hist_file"], args["hist_size"]))
