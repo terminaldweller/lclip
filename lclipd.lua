@@ -43,6 +43,12 @@ local sql_insert = [=[
 insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 ]=]
 
+local pid_file = "/tmp/lclipd.pid"
+local db_file_name = "/tmp/lclipd_db_name"
+
+--- We are not longer running.
+local function remove_pid_file() os.remove(pid_file) end
+
 --- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 local function default_luarocks_modules()
     local luarocks_handle = io.popen("luarocks-5.3 path --bin")
@@ -64,8 +70,10 @@ local function default_luarocks_modules()
 end
 default_luarocks_modules()
 
-local function sleep(n) os.execute("sleep " .. tonumber(n)) end
--- local function trim(s) return s:gsub("^%s+", ""):gsub("%s+$", "") end
+local function lclip_exit(n)
+    os.exit(n)
+    remove_pid_file()
+end
 
 local parser = argparse()
 parser:option("-s --hist_size", "history file size", 200)
@@ -83,43 +91,49 @@ end
 
 --- Checks to make sure that the pid file for clipd does not exist.
 local function check_pid_file()
-    local f = sys_stat.stat("/var/run/clipd.pid")
+    local f = sys_stat.stat(pid_file)
     if f ~= nil then
         log_to_syslog("clipd is already running", posix_syslog.LOG_CRIT)
-        os.exit(1)
+        lclip_exit(1)
     end
 end
 
--- FIXME- we cant write to /var/run since we are running as non-root user
---- Writes the pidfile to we can later check to make sure this is the only
--- instance running.
+--- instance running.
 local function write_pid_file()
-    local f = io.open("/var/run/clipd.pid", "w")
+    local f = io.open(pid_file, "w")
     if f == nil then
         log_to_syslog("cant open pid file for writing", posix_syslog.LOG_CRIT)
-        os.exit(1)
+        lclip_exit(1)
     end
-    f.write(unistd.getpid())
+    f:write(tostring(unistd.getpid()))
 end
-
--- TODO- implement me
-local function remove_pid_file() end
 
 --- Get the clipboard content from X or wayland.
 local function get_clipboard_content()
-    local wait_for_event_x = io.popen("clipnotify")
-    local handle_x = io.popen("xsel -ob")
+    -- clipnotify exits when there is a new entry on the clipboard
+    -- so we do want a blocking call here
+    os.execute("clipnotify")
+
+    -- we dont care whether all the calls to clipboard progs succeed
+    -- or not. so we just mask the errors.
+    local _, handle_x = pcall(io.popen, "xsel -ob")
+    handle_x:flush()
     local last_clip_entry_x = handle_x:read("*a")
 
-    -- FIXME- fix for wayland
-    -- local wait_for_event_w = io.popen("clipnotify")
-    -- local handle_w = io.popen("wl-paste")
-    -- local last_clip_entry_w = handle_w:read("*a")
+    local _, handle_w = pcall(io.popen, "wl-paste")
+    handle_w:flush()
+    local last_clip_entry_w = handle_w:read("*a")
 
-    if last_clip_entry_x ~= "" then
-        return last_clip_entry_x
-    else
+    local _, handle_p = pcall(io.popen, "pyclip paste")
+    handle_p:flush()
+    local last_clip_entry_p = handle_p:read("*a")
+
+    if last_clip_entry_p ~= "" then
+        return last_clip_entry_p
+    elseif last_clip_entry_w ~= "" then
         return last_clip_entry_w
+    elseif last_clip_entry_x ~= "" then
+        return last_clip_entry_x
     end
 end
 
@@ -133,14 +147,16 @@ local function get_sqlite_handle()
     local clipDB = sqlite3.open(tmp_db_name,
                                 sqlite3.OPEN_READWRITE + sqlite3.OPEN_CREATE)
     if clipDB == nil then
-        log_to_syslog("could not open the database")
-        os.exit(1)
+        log_to_syslog("could not open the database", posix_syslog.LOG_CRIT)
+        lclip_exit(1)
     end
 
-    local tmp_db_file = io.open("/tmp/lclipd_db_name", "w")
+    local tmp_db_file = io.open(db_file_name, "w")
+    local stdout = io.output()
     io.output(tmp_db_file)
     io.write(tmp_db_name .. "\n")
     io.close(tmp_db_file)
+    io.output(stdout)
 
     return clipDB
 end
@@ -152,12 +168,20 @@ local function loop(clip_hist_size)
 
     -- create the table if it does not exist
     local return_code = sqlite_handle:exec(sql_create_table)
-    if return_code ~= sqlite3.OK then log_to_syslog(tostring(return_code)) end
+    if return_code ~= sqlite3.OK then
+        log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
+        log_to_syslog("could not create table", posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
 
     -- add the trigger
     sql_trigger = sql_trigger:gsub("XXX", clip_hist_size)
     return_code = sqlite_handle:exec(sql_trigger)
-    if return_code ~= sqlite3.OK then log_to_syslog(tostring(return_code)) end
+    if return_code ~= sqlite3.OK then
+        log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
+        log_to_syslog("could not add trigger to table", posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
 
     while true do
         local clip_content = get_clipboard_content()
@@ -166,21 +190,20 @@ local function loop(clip_hist_size)
             local insert_string = sql_insert:gsub("XXX", clip_content)
             sqlite_handle:exec(insert_string)
             if return_code ~= sqlite3.OK then
-                log_to_syslog(tostring(return_code))
+                log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
             end
         end
-
-        sleep(1)
     end
 end
 
---- The entry point
+--- The entry point.
 local function main()
     signal.signal(signal.SIGINT, function(signum) os.exit(128 + signum) end)
+
     local args = parser:parse()
     check_pid_file()
-    -- write_pid_file()
-    local status, err = pcall(loop(args["hist_size"]))
+    write_pid_file()
+    local status, err = pcall(loop, args["hist_size"])
     if ~status then log_to_syslog(err, posix_syslog.LOG_CRIT) end
     remove_pid_file()
 end
