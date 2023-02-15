@@ -14,15 +14,14 @@ local sqlite3 = require("lsqlite3")
 
 local sql_create_table = [=[
 create table if not exists lclipd (
-    id integer primary key autoincrement,
+    id integer primary key,
     content text unique not null,
-    dateAdded integer not null,
+    dateAdded integer not null
 );
 ]=]
 
--- TODO
 local sql_trigger = [=[
-create trigger t_bi_prune before insert on lclipd
+create trigger if not exists hist_prune before insert on lclipd
 begin
     delete from lclipd
     where id = (
@@ -35,11 +34,12 @@ begin
     and (
         select count(id)
         from lclipd
-    ) >= %d;
+    ) >= XXX;
+end;
 ]=]
 
 local sql_insert = [=[
-insert into lclipd (, %s, unixepoch());
+insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 ]=]
 
 --- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
@@ -64,12 +64,10 @@ end
 default_luarocks_modules()
 
 local function sleep(n) os.execute("sleep " .. tonumber(n)) end
-local function trim(s) return s:gsub("^%s+", ""):gsub("%s+$", "") end
+-- local function trim(s) return s:gsub("^%s+", ""):gsub("%s+$", "") end
 
 local parser = argparse()
 parser:option("-s --hist_size", "history file size", 200)
-parser:option("-f --hist_file", "history file location",
-              "/home/devi/.clip_history")
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -112,9 +110,9 @@ local function get_clipboard_content()
     local handle_x = io.popen("xsel -ob")
     local last_clip_entry_x = handle_x:read("*a")
 
-    local wait_for_event_w = io.popen("clipnotify")
-    local handle_w = io.popen("wl-paste")
-    local last_clip_entry_w = handle_w:read("*a")
+    -- local wait_for_event_w = io.popen("clipnotify")
+    -- local handle_w = io.popen("wl-paste")
+    -- local last_clip_entry_w = handle_w:read("*a")
 
     if last_clip_entry_x ~= "" then
         return last_clip_entry_x
@@ -137,26 +135,40 @@ local function get_sqlite_handle()
         os.exit(1)
     end
 
+    local tmp_db_file = io.open("/tmp/lclipd_db_name", "w")
+    io.output(tmp_db_file)
+    io.write(tmp_db_name .. "\n")
+    io.close(tmp_db_file)
+
     return clipDB
 end
 
 --- The clipboard's main loop
--- @param clip_hist path to the clip history file
 -- @param clip_hist_size number of entries limit for the clip history file
-local function loop(clip_hist, clip_hist_size)
+local function loop(clip_hist_size)
     local sqlite_handle = get_sqlite_handle()
-    sqlite_handle:exec(sql_create_table)
-    sqlite_handle:exec(sql_trigger)
+
+    -- create the table if it does not exist
+    local return_code = sqlite_handle:exec(sql_create_table)
+    if return_code ~= sqlite3.OK then log_to_syslog(tostring(return_code)) end
+
+    -- add the trigger
+    sql_trigger = sql_trigger:gsub("XXX", clip_hist_size)
+    return_code = sqlite_handle:exec(sql_trigger)
+    if return_code ~= sqlite3.OK then log_to_syslog(tostring(return_code)) end
 
     while true do
-        local wait_for_event = io.popen("clipnotify")
-        local handle = io.popen("xsel -ob")
-        local last_clip_entry = handle:read("*a")
-
         local clip_content = get_clipboard_content()
-        sqlite_handle:exec(sql_insert)
 
-        sleep(.2)
+        if clip_content ~= nil then
+            local insert_string = sql_insert:gsub("XXX", clip_content)
+            sqlite_handle:exec(insert_string)
+            if return_code ~= sqlite3.OK then
+                log_to_syslog(tostring(return_code))
+            end
+        end
+
+        sleep(1)
     end
 end
 
@@ -166,7 +178,7 @@ local function main()
     local args = parser:parse()
     check_pid_file()
     -- write_pid_file()
-    local status, err = pcall(loop(args["hist_file"], args["hist_size"]))
+    local status, err = pcall(loop(args["hist_size"]))
     if ~status then log_to_syslog(err, posix_syslog.LOG_CRIT) end
     remove_pid_file()
 end
