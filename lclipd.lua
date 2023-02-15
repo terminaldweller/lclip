@@ -3,7 +3,8 @@
 -- needs xsel, clipnotify
 -- luarocks-5.3 install --local luaposix
 -- luarocks-5.3 install --local argparse
--- cat .clip_history | dmenu -l 10 | xsel -ib
+-- luarocks-5.3 install --local lsqlite3
+-- sqlite3 $(cat /tmp/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
 local string = require("string")
 local signal = require("posix.signal")
 local argparse = require("argparse")
@@ -110,6 +111,7 @@ local function get_clipboard_content()
     local handle_x = io.popen("xsel -ob")
     local last_clip_entry_x = handle_x:read("*a")
 
+    -- FIXME- fix for wayland
     -- local wait_for_event_w = io.popen("clipnotify")
     -- local handle_w = io.popen("wl-paste")
     -- local last_clip_entry_w = handle_w:read("*a")
