@@ -6,50 +6,7 @@
 -- luarocks-5.3 install --local lsqlite3
 -- sqlite3 $(cat /tmp/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
 local string = require("string")
-local signal = require("posix.signal")
-local argparse = require("argparse")
-local sys_stat = require("posix.sys.stat")
-local unistd = require("posix.unistd")
-local posix_syslog = require("posix.syslog")
-local sqlite3 = require("lsqlite3")
 
-local sql_create_table = [=[
-create table if not exists lclipd (
-    id integer primary key,
-    content text unique not null,
-    dateAdded integer not null
-);
-]=]
-
-local sql_trigger = [=[
-create trigger if not exists hist_prune before insert on lclipd
-begin
-    delete from lclipd
-    where id = (
-        select id
-        from lclipd as o
-        where (select count(id) from lclipd where content == o.content) > 1
-        order by id
-        limit 1
-    )
-    and (
-        select count(id)
-        from lclipd
-    ) >= XXX;
-end;
-]=]
-
-local sql_insert = [=[
-insert into lclipd(content,dateAdded) values('XXX', unixepoch());
-]=]
-
-local pid_file = "/tmp/lclipd.pid"
-local db_file_name = "/tmp/lclipd_db_name"
-
---- We are not longer running.
-local function remove_pid_file() os.remove(pid_file) end
-
---- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 local function default_luarocks_modules()
     local luarocks_handle = io.popen("luarocks-5.3 path --bin")
     local path_b = false
@@ -69,6 +26,63 @@ local function default_luarocks_modules()
     if cpath_b then os.exit(1) end
 end
 default_luarocks_modules()
+
+local signal = require("posix.signal")
+local argparse = require("argparse")
+local sys_stat = require("posix.sys.stat")
+local unistd = require("posix.unistd")
+local posix_syslog = require("posix.syslog")
+local sqlite3 = require("lsqlite3")
+
+local sql_create_table = [=[
+create table if not exists lclipd (
+    id integer primary key,
+    content text unique not null,
+    dateAdded integer not null
+);
+]=]
+
+local sql_dupe_trigger = [=[
+create trigger if not exists hist_dupe_prune before insert on lclipd
+begin
+    delete from lclipd
+    where id = (
+        select id
+        from lclipd as o
+        where (select count(id) from lclipd where content == o.content) > 1
+        order by id
+        limit 1
+    );
+end;
+]=]
+
+local sql_old_reap_trigger = [=[
+create trigger if not exists hist_old_reap before insert on lclipd
+begin
+    delete from lclipd
+    where id = (
+        select id from lclipd
+        order by timeAdded
+        asc 
+        limit 20
+    ) and (
+        select count(id)
+        from lclipd
+    ) >= XXX;
+end;
+]=]
+
+local sql_insert = [=[
+insert into lclipd(content,dateAdded) values('XXX', unixepoch());
+]=]
+
+local pid_file = "/tmp/lclipd.pid"
+local db_file_name = "/tmp/lclipd_db_name"
+
+--- We are not longer running.
+local function remove_pid_file() os.remove(pid_file) end
+
+--- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 
 local function lclip_exit(n)
     os.exit(n)
@@ -124,16 +138,16 @@ local function get_clipboard_content()
     handle_w:flush()
     local last_clip_entry_w = handle_w:read("*a")
 
-    local _, handle_p = pcall(io.popen, "pyclip paste")
-    handle_p:flush()
-    local last_clip_entry_p = handle_p:read("*a")
+    -- local _, handle_p = pcall(io.popen, "pyclip paste")
+    -- handle_p:flush()
+    -- local last_clip_entry_p = handle_p:read("*a")
 
-    if last_clip_entry_p ~= "" then
-        return last_clip_entry_p
+    -- if last_clip_entry_p ~= "" then
+    --     return last_clip_entry_p
+    if last_clip_entry_x ~= "" then
+        return last_clip_entry_x
     elseif last_clip_entry_w ~= "" then
         return last_clip_entry_w
-    elseif last_clip_entry_x ~= "" then
-        return last_clip_entry_x
     end
 end
 
@@ -174,12 +188,22 @@ local function loop(clip_hist_size)
         lclip_exit(1)
     end
 
-    -- add the trigger
-    sql_trigger = sql_trigger:gsub("XXX", clip_hist_size)
-    return_code = sqlite_handle:exec(sql_trigger)
+    -- add the de-dupe trigger
+    return_code = sqlite_handle:exec(sql_dupe_trigger)
     if return_code ~= sqlite3.OK then
         log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
-        log_to_syslog("could not add trigger to table", posix_syslog.LOG_CRIT)
+        log_to_syslog("could not add dupe trigger to table",
+                      posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
+
+    -- add the old_reap trigger
+    sql_old_reap_trigger = sql_old_reap_trigger:gsub("XXX", clip_hist_size)
+    return_code = sqlite_handle:exec(sql_dupe_trigger)
+    if return_code ~= sqlite3.OK then
+        log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
+        log_to_syslog("could not add old_reap trigger to table",
+                      posix_syslog.LOG_CRIT)
         lclip_exit(1)
     end
 
