@@ -33,12 +33,13 @@ local sys_stat = require("posix.sys.stat")
 local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 local sqlite3 = require("lsqlite3")
+local posix_wait = require("posix.sys.wait")
 
 local sql_create_table = [=[
 create table if not exists lclipd (
     id integer primary key,
     content text unique not null,
-    dateAdded integer not null
+    dateAdded integer unique not null
 );
 ]=]
 
@@ -56,6 +57,7 @@ begin
 end;
 ]=]
 
+-- We are deleting old entries in groups of 20 instead of one by one
 local sql_old_reap_trigger = [=[
 create trigger if not exists hist_old_reap before insert on lclipd
 begin
@@ -63,7 +65,7 @@ begin
     where id = (
         select id from lclipd
         order by timeAdded
-        asc 
+        asc
         limit 20
     ) and (
         select count(id)
@@ -78,6 +80,9 @@ insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 
 local pid_file = "/tmp/lclipd.pid"
 local db_file_name = "/tmp/lclipd_db_name"
+
+--- A sleep function
+local function sleep(n) os.execute("sleep " .. tonumber(n)) end
 
 --- We are not longer running.
 local function remove_pid_file() os.remove(pid_file) end
@@ -103,6 +108,11 @@ local function log_to_syslog(log_str, log_priority)
     posix_syslog.closelog()
 end
 
+local function check_uid_gid()
+    log_to_syslog(tostring(unistd.getuid()) .. ":" .. tostring(unistd.getgid()),
+                  posix_syslog.LOG_INFO)
+end
+
 --- Checks to make sure that the pid file for clipd does not exist.
 local function check_pid_file()
     local f = sys_stat.stat(pid_file)
@@ -124,30 +134,40 @@ end
 
 --- Get the clipboard content from X or wayland.
 local function get_clipboard_content()
-    -- clipnotify exits when there is a new entry on the clipboard
-    -- so we do want a blocking call here
-    os.execute("clipnotify")
+    -- if we use a plain os.execute for clipnotify we wont get the ctrl-c
+    -- when it is pressed. doing it manually though the parent receives 
+    -- the SIGINT just fine.
+    local pid, errmsg = unistd.fork()
+    if pid == nil then
+        log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
+        log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+        remove_pid_file()
+        os.exit(1)
+    elseif pid == 0 then
+        -- clipnotify exits when there is a new entry on the clipboard
+        -- so we do want a blocking call here
+        os.execute("clipnotify")
+        os.exit(0)
+    else
+        posix_wait.wait(pid)
+        -- we dont care whether all the calls to clipboard progs succeed
+        -- or not. so we just mask the errors.
+        local _, handle_x = pcall(io.popen, "xsel -ob")
+        local last_clip_entry_x = handle_x:read("*a")
 
-    -- we dont care whether all the calls to clipboard progs succeed
-    -- or not. so we just mask the errors.
-    local _, handle_x = pcall(io.popen, "xsel -ob")
-    handle_x:flush()
-    local last_clip_entry_x = handle_x:read("*a")
+        local _, handle_w = pcall(io.popen, "wl-paste")
+        local last_clip_entry_w = handle_w:read("*a")
 
-    local _, handle_w = pcall(io.popen, "wl-paste")
-    handle_w:flush()
-    local last_clip_entry_w = handle_w:read("*a")
+        local _, handle_p = pcall(io.popen, "pyclip paste")
+        local last_clip_entry_p = handle_p:read("*a")
 
-    -- local _, handle_p = pcall(io.popen, "pyclip paste")
-    -- handle_p:flush()
-    -- local last_clip_entry_p = handle_p:read("*a")
-
-    -- if last_clip_entry_p ~= "" then
-    --     return last_clip_entry_p
-    if last_clip_entry_x ~= "" then
-        return last_clip_entry_x
-    elseif last_clip_entry_w ~= "" then
-        return last_clip_entry_w
+        if last_clip_entry_p ~= "" then
+            return last_clip_entry_p
+        elseif last_clip_entry_x ~= "" and last_clip_entry_x ~= nil then
+            return last_clip_entry_x
+        elseif last_clip_entry_w ~= "" and last_clip_entry_w ~= nil then
+            return last_clip_entry_w
+        end
     end
 end
 
@@ -155,7 +175,7 @@ end
 local function get_sqlite_handle()
     local tmp_db_name = "/tmp/" ..
                             io.popen(
-                                "tr -dc A-Za-z0-9 </dev/urandom | head -c 13"):read(
+                                "tr -dc A-Za-z0-9 </dev/urandom | head -c 17"):read(
                                 "*a")
     log_to_syslog(tmp_db_name, posix_syslog.LOG_INFO)
     local clipDB = sqlite3.open(tmp_db_name,
@@ -207,8 +227,13 @@ local function loop(clip_hist_size)
         lclip_exit(1)
     end
 
+    log_to_syslog("starting the main loop", posix_syslog.LOG_INFO)
     while true do
         local clip_content = get_clipboard_content()
+        -- remove trailing/leading whitespace
+        if clip_content == nil then goto continue end
+        clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
+        sleep(0.2)
 
         if clip_content ~= nil then
             local insert_string = sql_insert:gsub("XXX", clip_content)
@@ -217,19 +242,31 @@ local function loop(clip_hist_size)
                 log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
             end
         end
+        ::continue::
     end
 end
 
 --- The entry point.
 local function main()
-    signal.signal(signal.SIGINT, function(signum) os.exit(128 + signum) end)
+    -- local pgrpid = unistd.getpgrp()
+    signal.signal(signal.SIGINT, function(signum)
+        remove_pid_file()
+        io.write("\n")
+        os.exit(128 + signum)
+    end)
+    signal.signal(signal.SIGTERM, function(signum)
+        remove_pid_file()
+        io.write("\n")
+        os.exit(128 + signum)
+    end)
 
     local args = parser:parse()
-    check_pid_file()
-    write_pid_file()
+    -- check_pid_file()
+    -- write_pid_file()
+    check_uid_gid()
     local status, err = pcall(loop, args["hist_size"])
-    if ~status then log_to_syslog(err, posix_syslog.LOG_CRIT) end
-    remove_pid_file()
+    if status ~= true then log_to_syslog(err, posix_syslog.LOG_CRIT) end
 end
 
-main()
+local status, _ = pcall(main)
+if status ~= true then remove_pid_file() end
