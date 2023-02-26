@@ -27,6 +27,8 @@ local function default_luarocks_modules()
 end
 default_luarocks_modules()
 
+-- we want to delete a pidfile if we wrote one
+local wrote_a_pidfile = false
 local signal = require("posix.signal")
 local argparse = require("argparse")
 local sys_stat = require("posix.sys.stat")
@@ -85,7 +87,7 @@ local db_file_name = "/tmp/lclipd_db_name"
 local function sleep(n) os.execute("sleep " .. tonumber(n)) end
 
 --- We are not longer running.
-local function remove_pid_file() os.remove(pid_file) end
+local function remove_pid_file() if wrote_a_pidfile then os.remove(pid_file) end end
 
 --- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 
@@ -113,16 +115,32 @@ local function check_uid_gid()
                   posix_syslog.LOG_INFO)
 end
 
---- Checks to make sure that the pid file for clipd does not exist.
+--- Tries to determine whether another instance is running, if yes, quits
 local function check_pid_file()
     local f = sys_stat.stat(pid_file)
     if f ~= nil then
-        log_to_syslog("clipd is already running", posix_syslog.LOG_CRIT)
-        lclip_exit(1)
+        local pid_file_handle = io.open(pid_file, "r")
+        local pid_file_content = pid_file_handle:read("*a")
+        pid_file_content = pid_file_content:gsub("\n", "")
+        log_to_syslog(pid_file_content, posix_syslog.LOG_INFO)
+
+        local old_pid_file = sys_stat.stat("/proc/" .. pid_file_content)
+        if old_pid_file ~= nil then
+            local pid_cmdline = io.open("/proc/" .. pid_file_content ..
+                                            "/cmdline", "r")
+            local pid_cmdline_content = pid_cmdline:read("*a")
+            if string.match(pid_cmdline_content, "lclipd") then
+                -- we assume a lclipd instance is already running at this point
+                log_to_syslog("clipd is already running", posix_syslog.LOG_CRIT)
+                lclip_exit(1)
+            end
+            -- the old pid file is stale, meaning the previous instance
+            -- died without being able to clean up after itself
+        end
     end
 end
 
---- instance running.
+--- Write a pidfile
 local function write_pid_file()
     local f = io.open(pid_file, "w")
     if f == nil then
@@ -130,28 +148,28 @@ local function write_pid_file()
         lclip_exit(1)
     end
     f:write(tostring(unistd.getpid()))
+    wrote_a_pidfile = true
 end
 
 --- Get the clipboard content from X or wayland.
 local function get_clipboard_content()
-    -- if we use a plain os.execute for clipnotify we wont get the ctrl-c
-    -- when it is pressed. doing it manually though the parent receives 
+    -- if we use a plain os.execute for clipnotify the parent wont get the
+    -- SIGINT when it is passed. if we fork though, the parent receives
     -- the SIGINT just fine.
     local pid, errmsg = unistd.fork()
-    if pid == nil then
+    if pid == nil then -- error
         log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
         log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
-        remove_pid_file()
-        os.exit(1)
-    elseif pid == 0 then
+        lclip_exit(1)
+    elseif pid == 0 then -- child
         -- clipnotify exits when there is a new entry on the clipboard
         -- so we do want a blocking call here
         os.execute("clipnotify")
         os.exit(0)
-    else
+    else -- parent
         posix_wait.wait(pid)
-        -- we dont care whether all the calls to clipboard progs succeed
-        -- or not. so we just mask the errors.
+        -- we dont care whether all the calls to the different clipboard apps
+        -- succeed or not so we just ignore the errors.
         local _, handle_x = pcall(io.popen, "xsel -ob")
         local last_clip_entry_x = handle_x:read("*a")
 
@@ -261,8 +279,8 @@ local function main()
     end)
 
     local args = parser:parse()
-    -- check_pid_file()
-    -- write_pid_file()
+    check_pid_file()
+    write_pid_file()
     check_uid_gid()
     local status, err = pcall(loop, args["hist_size"])
     if status ~= true then log_to_syslog(err, posix_syslog.LOG_CRIT) end
