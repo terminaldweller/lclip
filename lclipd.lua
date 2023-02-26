@@ -83,6 +83,28 @@ insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 local pid_file = "/tmp/lclipd.pid"
 local db_file_name = "/tmp/lclipd_db_name"
 
+--- Calculates metric entropy for a string
+local function get_string_metric_entropy(str)
+    local map = {}
+    for i = 1, #str do
+        if map[str:sub(i, i)] ~= nil then
+            map[str:sub(i, i)] = map[str:sub(i, i)] + 1
+        else
+            map[str:sub(i, i)] = 1
+        end
+    end
+
+    for k, v in pairs(map) do map[k] = v / #str end
+
+    local entropy = 0
+
+    for _, v in pairs(map) do
+        entropy = entropy + v * (math.log(v) / math.log(2))
+    end
+
+    return -entropy / #str
+end
+
 --- A sleep function
 local function sleep(n) os.execute("sleep " .. tonumber(n)) end
 
@@ -162,12 +184,13 @@ local function get_clipboard_content()
         log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
         lclip_exit(1)
     elseif pid == 0 then -- child
-        -- clipnotify exits when there is a new entry on the clipboard
-        -- so we do want a blocking call here
         os.execute("clipnotify")
         os.exit(0)
     else -- parent
+        -- clipnotify exits when there is a new entry on the clipboard
+        -- so we do want a blocking call here
         posix_wait.wait(pid)
+
         -- we dont care whether all the calls to the different clipboard apps
         -- succeed or not so we just ignore the errors.
         local _, handle_x = pcall(io.popen, "xsel -ob")
