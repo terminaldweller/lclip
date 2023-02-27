@@ -1,10 +1,11 @@
 #!/usr/bin/env lua5.3
 
--- needs xsel, clipnotify
+-- needs xsel, clipnotify, pyclip, wclip
 -- luarocks-5.3 install --local luaposix
 -- luarocks-5.3 install --local argparse
 -- luarocks-5.3 install --local lsqlite3
--- sqlite3 $(cat /tmp/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
+-- luarocks-5.3 install --local rxi-json-lua
+-- for the front-end, sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
 local string = require("string")
 
 local function default_luarocks_modules()
@@ -27,8 +28,9 @@ local function default_luarocks_modules()
 end
 default_luarocks_modules()
 
--- we want to delete a pidfile if we wrote one
+-- we want to delete a pidfile if we wrote one, otherwise we won't
 local wrote_a_pidfile = false
+
 local signal = require("posix.signal")
 local argparse = require("argparse")
 local sys_stat = require("posix.sys.stat")
@@ -36,6 +38,7 @@ local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 local sqlite3 = require("lsqlite3")
 local posix_wait = require("posix.sys.wait")
+local json = require("json")
 
 local sql_create_table = [=[
 create table if not exists lclipd (
@@ -80,30 +83,9 @@ local sql_insert = [=[
 insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 ]=]
 
-local pid_file = "/tmp/lclipd.pid"
-local db_file_name = "/tmp/lclipd_db_name"
-
---- Calculates metric entropy for a string
-local function get_string_metric_entropy(str)
-    local map = {}
-    for i = 1, #str do
-        if map[str:sub(i, i)] ~= nil then
-            map[str:sub(i, i)] = map[str:sub(i, i)] + 1
-        else
-            map[str:sub(i, i)] = 1
-        end
-    end
-
-    for k, v in pairs(map) do map[k] = v / #str end
-
-    local entropy = 0
-
-    for _, v in pairs(map) do
-        entropy = entropy + v * (math.log(v) / math.log(2))
-    end
-
-    return -entropy / #str
-end
+local tmp_dir = "/tmp/lclipd"
+local pid_file = "/tmp/lclipd/lclipd.pid"
+local db_file_name = "/tmp/lclipd/lclipd_db_name"
 
 --- A sleep function
 local function sleep(n) os.execute("sleep " .. tonumber(n)) end
@@ -137,7 +119,31 @@ local function check_uid_gid()
                   posix_syslog.LOG_INFO)
 end
 
+--- Creates the necessary dirs
+local function make_tmp_dirs()
+    local f = sys_stat.stat(tmp_dir)
+    if f == nil then
+        local ret = sys_stat.mkdir(tmp_dir)
+        if ret ~= 0 then
+            log_to_syslog(ret, posix_syslog.LOG_CRIT)
+            os.exit(1)
+        end
+    end
+
+    f = sys_stat.stat(tmp_dir .. "/secrets")
+    if f == nil then
+        local ret = sys_stat.mkdir(tmp_dir .. "/secrets")
+        if ret ~= 0 then
+            log_to_syslog(ret, posix_syslog.LOG_CRIT)
+            os.exit(1)
+        end
+    end
+end
+
 --- Tries to determine whether another instance is running, if yes, quits
+-- obvisouly doing it like this is imprecise but the chances of it failing
+-- are very low unless we have a constant known way of calling the script
+-- so that we can match for that  exactly for the procfs cmdline check.
 local function check_pid_file()
     local f = sys_stat.stat(pid_file)
     if f ~= nil then
@@ -157,7 +163,8 @@ local function check_pid_file()
                 lclip_exit(1)
             end
             -- the old pid file is stale, meaning the previous instance
-            -- died without being able to clean up after itself
+            -- died without being able to clean up after itself because
+            -- e.g. it received a SIGKILL
         end
     end
 end
@@ -171,6 +178,49 @@ local function write_pid_file()
     end
     f:write(tostring(unistd.getpid()))
     wrote_a_pidfile = true
+end
+
+--- Runs secret detection tests
+local function detect_secrets()
+    local pipe_read, pipe_write = unistd.pipe()
+
+    local pid, errmsg = unistd.fork()
+    if pid == nil then
+        pipe_read:close()
+        pipe_write:close()
+        log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
+        log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    elseif pid == 0 then -- child
+        pipe_read:close()
+        local _, secrets_baseline_handle = pcall(io.popen,
+                                                 "detect-secrets scan " ..
+                                                     tmp_dir .. "/secrets " ..
+                                                     "--all-files")
+        local secrets_baseline = secrets_baseline_handle:read("*a")
+        if secrets_baseline == nil then
+            log_to_syslog("detect-secrets returned nil",
+                          log_to_syslog.LOG_WARNING)
+            return
+        end
+        local secrets_baseline_json = json.decode(secrets_baseline)
+
+        if next(secrets_baseline_json) ~= nil then
+            pipe_write:write(false)
+        else
+            pipe_write:write(true)
+        end
+        os.exit(0)
+    elseif pid > 0 then -- parent
+        pipe_write:close()
+        posix_wait.wait(pid)
+        local result = pipe_read:read("*a")
+        if result then
+            return true
+        else
+            return false
+        end
+    end
 end
 
 --- Get the clipboard content from X or wayland.
@@ -289,7 +339,6 @@ end
 
 --- The entry point.
 local function main()
-    -- local pgrpid = unistd.getpgrp()
     signal.signal(signal.SIGINT, function(signum)
         remove_pid_file()
         io.write("\n")
@@ -301,6 +350,7 @@ local function main()
         os.exit(128 + signum)
     end)
 
+    make_tmp_dirs()
     local args = parser:parse()
     check_pid_file()
     write_pid_file()
