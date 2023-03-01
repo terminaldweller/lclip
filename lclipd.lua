@@ -4,8 +4,7 @@
 -- luarocks-5.3 install --local luaposix
 -- luarocks-5.3 install --local argparse
 -- luarocks-5.3 install --local lsqlite3
--- luarocks-5.3 install --local rxi-json-lua
--- for the front-end, sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
+-- front-end example: sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
 local string = require("string")
 
 local function default_luarocks_modules()
@@ -38,6 +37,11 @@ local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 local sqlite3 = require("lsqlite3")
 local posix_wait = require("posix.sys.wait")
+local libgen = require("posix.libgen")
+
+-- we have a vendored dependency
+local base_path = libgen.dirname(arg[0])
+package.path = package.path .. ";" .. base_path .. "/?.lua"
 local json = require("json")
 
 local sql_create_table = [=[
@@ -183,8 +187,14 @@ end
 --- Runs secret detection tests
 local function detect_secrets()
     local pipe_read, pipe_write = unistd.pipe()
+    if pipe_read == nil then
+        log_to_syslog("could not create pipe", posix_syslog.LOG_CRIT)
+        log_to_syslog(pipe_write, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
 
     local pid, errmsg = unistd.fork()
+
     if pid == nil then
         pipe_read:close()
         pipe_write:close()
@@ -201,7 +211,7 @@ local function detect_secrets()
         if secrets_baseline == nil then
             log_to_syslog("detect-secrets returned nil",
                           log_to_syslog.LOG_WARNING)
-            return
+            return true
         end
         local secrets_baseline_json = json.decode(secrets_baseline)
 
@@ -244,21 +254,29 @@ local function get_clipboard_content()
         -- we dont care whether all the calls to the different clipboard apps
         -- succeed or not so we just ignore the errors.
         local _, handle_x = pcall(io.popen, "xsel -ob")
-        local last_clip_entry_x = handle_x:read("*a")
+        if handle_x ~= nil then
+            local last_clip_entry_x = handle_x:read("*a")
+            if last_clip_entry_x ~= "" and last_clip_entry_x ~= nil then
+                return last_clip_entry_x
+            end
+        end
 
         local _, handle_w = pcall(io.popen, "wl-paste")
-        local last_clip_entry_w = handle_w:read("*a")
+        if handle_w ~= nil then
+            local last_clip_entry_w = handle_w:read("*a")
+            if last_clip_entry_w ~= "" and last_clip_entry_w ~= nil then
+                return last_clip_entry_w
+            end
+        end
 
         local _, handle_p = pcall(io.popen, "pyclip paste")
-        local last_clip_entry_p = handle_p:read("*a")
-
-        if last_clip_entry_p ~= "" then
-            return last_clip_entry_p
-        elseif last_clip_entry_x ~= "" and last_clip_entry_x ~= nil then
-            return last_clip_entry_x
-        elseif last_clip_entry_w ~= "" and last_clip_entry_w ~= nil then
-            return last_clip_entry_w
+        if handle_p ~= nil then
+            local last_clip_entry_p = handle_p:read("*a")
+            if last_clip_entry_p ~= "" and last_clip_entry_p ~= nil then
+                return last_clip_entry_p
+            end
         end
+
     end
 end
 
@@ -326,12 +344,11 @@ local function loop(clip_hist_size)
         clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
         sleep(0.2)
 
-        if clip_content ~= nil then
-            local insert_string = sql_insert:gsub("XXX", clip_content)
-            sqlite_handle:exec(insert_string)
-            if return_code ~= sqlite3.OK then
-                log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
-            end
+        if clip_content == nil then goto continue end
+        local insert_string = sql_insert:gsub("XXX", clip_content)
+        sqlite_handle:exec(insert_string)
+        if return_code ~= sqlite3.OK then
+            log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
         end
         ::continue::
     end
