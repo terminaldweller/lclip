@@ -40,6 +40,7 @@ local posix_wait = require("posix.sys.wait")
 local libgen = require("posix.libgen")
 
 -- we have a vendored dependency
+-- https://github.com/rxi/json.lua
 local base_path = libgen.dirname(arg[0])
 package.path = package.path .. ";" .. base_path .. "/?.lua"
 local json = require("json")
