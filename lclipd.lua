@@ -186,7 +186,8 @@ local function write_pid_file()
 end
 
 --- Runs secret detection tests
-local function detect_secrets()
+-- returns true if the string is not a secret
+local function detect_secrets(clipboard_content)
     local pipe_read, pipe_write = unistd.pipe()
     if pipe_read == nil then
         log_to_syslog("could not create pipe", posix_syslog.LOG_CRIT)
@@ -197,39 +198,35 @@ local function detect_secrets()
     local pid, errmsg = unistd.fork()
 
     if pid == nil then
-        pipe_read:close()
-        pipe_write:close()
+        unistd.closr(pipe_read)
+        unistd.closr(pipe_write)
         log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
         log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
         lclip_exit(1)
     elseif pid == 0 then -- child
-        pipe_read:close()
+        unistd.close(pipe_read)
         local _, secrets_baseline_handle = pcall(io.popen,
-                                                 "detect-secrets scan " ..
-                                                     tmp_dir .. "/secrets " ..
-                                                     "--all-files")
+                                                 "detect-secrets scan --string " ..
+                                                     clipboard_content ..
+                                                     "| grep -v False")
         local secrets_baseline = secrets_baseline_handle:read("*a")
-        if secrets_baseline == nil then
-            log_to_syslog("detect-secrets returned nil",
-                          log_to_syslog.LOG_WARNING)
-            return true
+        if secrets_baseline == "" then
+            unistd.write(pipe_write, "1")
+        else
+            unistd.write(pipe_write, "0")
         end
-        local secrets_baseline_json = json.decode(secrets_baseline)
 
-        if next(secrets_baseline_json) ~= nil then
-            pipe_write:write(false)
-        else
-            pipe_write:write(true)
-        end
-        os.exit(0)
+        unistd.close(pipe_write)
+        unistd._exit(0)
     elseif pid > 0 then -- parent
-        pipe_write:close()
+        unistd.close(pipe_write)
         posix_wait.wait(pid)
-        local result = pipe_read:read("*a")
-        if result then
-            return true
-        else
+        local result = unistd.read(pipe_read, 1)
+        unistd.close(pipe_read)
+        if result == "0" then
             return false
+        else
+            return true
         end
     end
 end
@@ -246,7 +243,7 @@ local function get_clipboard_content()
         lclip_exit(1)
     elseif pid == 0 then -- child
         os.execute("clipnotify")
-        os.exit(0)
+        unistd._exit(0)
     else -- parent
         -- clipnotify exits when there is a new entry on the clipboard
         -- so we do want a blocking call here
@@ -270,13 +267,13 @@ local function get_clipboard_content()
             end
         end
 
-        local _, handle_p = pcall(io.popen, "pyclip paste")
-        if handle_p ~= nil then
-            local last_clip_entry_p = handle_p:read("*a")
-            if last_clip_entry_p ~= "" and last_clip_entry_p ~= nil then
-                return last_clip_entry_p
-            end
-        end
+        -- local _, handle_p = pcall(io.popen, "pyclip paste")
+        -- if handle_p ~= nil then
+        --     local last_clip_entry_p = handle_p:read("*a")
+        --     if last_clip_entry_p ~= "" and last_clip_entry_p ~= nil then
+        --         return last_clip_entry_p
+        --     end
+        -- end
 
     end
 end
@@ -347,7 +344,9 @@ local function loop(clip_hist_size)
 
         if clip_content == nil then goto continue end
         local insert_string = sql_insert:gsub("XXX", clip_content)
-        sqlite_handle:exec(insert_string)
+        if detect_secrets(clip_content) then
+            sqlite_handle:exec(insert_string)
+        end
         if return_code ~= sqlite3.OK then
             log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
         end
