@@ -88,6 +88,12 @@ local sql_insert = [=[
 insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 ]=]
 
+local detect_secrets_cmd = [=[
+detect-secrets scan --string <<- STR
+XXX
+STR | grep -v False
+]=]
+
 local tmp_dir = "/tmp/lclipd"
 local pid_file = "/tmp/lclipd/lclipd.pid"
 local db_file_name = "/tmp/lclipd/lclipd_db_name"
@@ -188,6 +194,7 @@ end
 --- Runs secret detection tests
 -- returns true if the string is not a secret
 local function detect_secrets(clipboard_content)
+    if clipboard_content == nil or clipboard_content == "" then return false end
     local pipe_read, pipe_write = unistd.pipe()
     if pipe_read == nil then
         log_to_syslog("could not create pipe", posix_syslog.LOG_CRIT)
@@ -205,10 +212,8 @@ local function detect_secrets(clipboard_content)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
-        local _, secrets_baseline_handle = pcall(io.popen,
-                                                 "detect-secrets scan --string " ..
-                                                     clipboard_content ..
-                                                     "| grep -v False")
+        local cmd = detect_secrets_cmd:gsub("XXX", clipboard_content)
+        local _, secrets_baseline_handle = pcall(io.popen, cmd)
         local secrets_baseline = secrets_baseline_handle:read("*a")
         if secrets_baseline == "" then
             unistd.write(pipe_write, "1")
