@@ -89,9 +89,9 @@ insert into lclipd(content,dateAdded) values('XXX', unixepoch());
 ]=]
 
 local detect_secrets_cmd = [=[
-detect-secrets scan --string <<- STR
+detect-secrets scan --string <<- STR | grep -v False
 XXX
-STR | grep -v False
+STR
 ]=]
 
 local tmp_dir = "/tmp/lclipd"
