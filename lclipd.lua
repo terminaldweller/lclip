@@ -37,13 +37,6 @@ local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 local sqlite3 = require("lsqlite3")
 local posix_wait = require("posix.sys.wait")
-local libgen = require("posix.libgen")
-
--- we have a vendored dependency
--- https://github.com/rxi/json.lua
-local base_path = libgen.dirname(arg[0])
-package.path = package.path .. ";" .. base_path .. "/?.lua"
-local json = require("json")
 
 local sql_create_table = [=[
 create table if not exists lclipd (
@@ -80,17 +73,17 @@ begin
     ) and (
         select count(id)
         from lclipd
-    ) >= XXX;
+    ) >= %s;
 end;
 ]=]
 
 local sql_insert = [=[
-insert into lclipd(content,dateAdded) values('XXX', unixepoch());
+insert into lclipd(content,dateAdded) values('%s', unixepoch());
 ]=]
 
 local detect_secrets_cmd = [=[
 detect-secrets scan --string <<- STR | grep -v False
-XXX
+%s
 STR
 ]=]
 
@@ -212,7 +205,7 @@ local function detect_secrets(clipboard_content)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
-        local cmd = detect_secrets_cmd:gsub("XXX", clipboard_content)
+        local cmd = string.format(detect_secrets_cmd, clipboard_content)
         local _, secrets_baseline_handle = pcall(io.popen, cmd)
         local secrets_baseline = secrets_baseline_handle:read("*a")
         if secrets_baseline == "" then
@@ -239,8 +232,8 @@ end
 --- Get the clipboard content from X or wayland.
 local function get_clipboard_content()
     -- if we use a plain os.execute for clipnotify the parent wont get the
-    -- SIGINT when it is passed. if we fork though, the parent receives
-    -- the SIGINT just fine.
+    -- SIGINT when it is passed.clipnotify will end up getting it.
+    -- if we fork though, the parent receives the SIGINT just fine.
     local pid, errmsg = unistd.fork()
     if pid == nil then -- error
         log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
@@ -272,14 +265,7 @@ local function get_clipboard_content()
             end
         end
 
-        -- local _, handle_p = pcall(io.popen, "pyclip paste")
-        -- if handle_p ~= nil then
-        --     local last_clip_entry_p = handle_p:read("*a")
-        --     if last_clip_entry_p ~= "" and last_clip_entry_p ~= nil then
-        --         return last_clip_entry_p
-        --     end
-        -- end
-
+        return nil
     end
 end
 
@@ -330,7 +316,7 @@ local function loop(clip_hist_size)
     end
 
     -- add the old_reap trigger
-    sql_old_reap_trigger = sql_old_reap_trigger:gsub("XXX", clip_hist_size)
+    sql_old_reap_trigger = string.format(sql_old_reap_trigger, clip_hist_size)
     return_code = sqlite_handle:exec(sql_dupe_trigger)
     if return_code ~= sqlite3.OK then
         log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
@@ -348,7 +334,8 @@ local function loop(clip_hist_size)
         sleep(0.2)
 
         if clip_content == nil then goto continue end
-        local insert_string = sql_insert:gsub("XXX", clip_content)
+        local insert_string = string.format(sql_insert, clip_content)
+
         if detect_secrets(clip_content) then
             sqlite_handle:exec(insert_string)
         end
