@@ -30,6 +30,8 @@ luarocks install --local lsqlite3
 pip install detect-secrets
 ```
 
+## Usage
+
 lclipd is technically just the "back-end". One way to have a frontend is to use dmenu:</br>
 ```sh
 sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
@@ -44,7 +46,7 @@ Options:
    -h, --help            Show this help message and exit.
             -s <hist_size>,
    --hist_size <hist_size>
-                         history file size
+                         number of distinct entries for clipboard history
 ```
 
 ## Supported OSes

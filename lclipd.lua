@@ -105,7 +105,8 @@ local function lclip_exit(n)
 end
 
 local parser = argparse()
-parser:option("-s --hist_size", "history file size", 200)
+parser:option("-s --hist_size",
+              "number of distinct entries for clipboard history", 200)
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
