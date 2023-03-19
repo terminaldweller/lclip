@@ -110,11 +110,14 @@ parser:option("-s --hist_size", "history file size", 200)
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
 -- @param log_priority the priority of the log string
+-- functions called through pcall will return nil when we
+-- try to get their name from debug.getinfo
 local function log_to_syslog(log_str, log_priority)
+    local caller_name = debug.getinfo(2, "n").name
     posix_syslog.openlog("clipd",
                          posix_syslog.LOG_NDELAY | posix_syslog.LOG_PID,
                          posix_syslog.LOG_LOCAL0)
-    posix_syslog.syslog(log_priority, log_str)
+    posix_syslog.syslog(log_priority, tostring(caller_name) .. ": " .. log_str)
     posix_syslog.closelog()
 end
 
