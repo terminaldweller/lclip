@@ -32,7 +32,7 @@ pip install detect-secrets
 
 ## Usage
 
-lclipd is technically just the "back-end". One way to have a frontend is to use dmenu:</br>
+lclipd is technically just the "backend". One way to have a frontend is to use dmenu:</br>
 ```sh
 #!/usr/bin/env sh
 
@@ -40,22 +40,22 @@ SQL_DB="$(cat /tmp/lclipd/lclipd_db_name)"
 content=$(sqlite3 "${SQL_DB}" "select replace(content,char(10),' '),id from lclipd;" | dmenu -fn "DejaVuSansMono Nerd Font Mono-11.3;antialias=true;autohint=true" -D "|" -l 20 -p "lclipd:")
 sqlite3 "${SQL_DB}" "select content from lclipd where id = ${content}" | xsel -ib
 ```
+For the above to work you have to have added the dynamic patch to dmenu.</br>
 
 ## Options
 
 ```
-Usage: ./lclipd.lua [-h] [-s <hist_size>]
+Usage: ./lclipd.lua [-h] [-s <hist_size>] [-d <detect_secrets_args>]
 
 Options:
    -h, --help            Show this help message and exit.
             -s <hist_size>,
    --hist_size <hist_size>
                          number of distinct entries for clipboard history
+                      -d <detect_secrets_args>,
+   --detect_secrets_args <detect_secrets_args>
+                         options that will be passed to detect secrets (default: )
 ```
 
 ## Supported OSes
 lcilpd uses luaposix so any POSIX-half-compliant OS will do.</br>
-
-## TODO
-* The DB permissions are not being taken care of.</br>
-* allow passing options to `detect-secrets`.</br>

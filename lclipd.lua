@@ -81,8 +81,9 @@ local sql_insert = [=[
 insert into lclipd(content,dateAdded) values('%s', unixepoch());
 ]=]
 
+-- using a heredoc string without expansion bypasses the need for escaping
 local detect_secrets_cmd = [=[
-detect-secrets scan --string <<- STR | grep -v False
+detect-secrets scan %s --string <<- STR | grep -v False
 %s
 STR
 ]=]
@@ -107,6 +108,8 @@ end
 local parser = argparse()
 parser:option("-s --hist_size",
               "number of distinct entries for clipboard history", 200)
+parser:option("-d --detect_secrets_args",
+              "options that will be passed to detect secrets", "")
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -125,6 +128,16 @@ end
 local function check_uid_gid()
     log_to_syslog(tostring(unistd.getuid()) .. ":" .. tostring(unistd.getgid()),
                   posix_syslog.LOG_INFO)
+end
+
+--- Change the permission to user read/write i.e. chmod 600
+-- @param path to the database file whose permissions will be set
+local function set_db_permissions(db_path)
+    local ret = sys_stat.chmod(db_path, sys_stat.S_IRUSR | sys_stat.S_IWUSR)
+    if ret ~= 0 then
+        log_to_syslog(tostring(ret), posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
 end
 
 --- Creates the necessary dirs
@@ -190,7 +203,9 @@ end
 
 --- Runs secret detection tests
 -- returns true if the string is not a secret
-local function detect_secrets(clipboard_content)
+-- @param clipboard_content the content that will be checked against detect-secrets
+-- @param detect_secrets_arg extra args that will be passed to detect-secrets scan
+local function detect_secrets(clipboard_content, detect_secrets_args)
     if clipboard_content == nil or clipboard_content == "" then return false end
     local pipe_read, pipe_write = unistd.pipe()
     if pipe_read == nil then
@@ -201,7 +216,7 @@ local function detect_secrets(clipboard_content)
 
     local pid, errmsg = unistd.fork()
 
-    if pid == nil then
+    if pid == nil then -- error
         unistd.closr(pipe_read)
         unistd.closr(pipe_write)
         log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
@@ -209,7 +224,8 @@ local function detect_secrets(clipboard_content)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
-        local cmd = string.format(detect_secrets_cmd, clipboard_content)
+        local cmd = string.format(detect_secrets_cmd, detect_secrets_args,
+                                  clipboard_content)
         local _, secrets_baseline_handle = pcall(io.popen, cmd)
         local secrets_baseline = secrets_baseline_handle:read("*a")
         if secrets_baseline == "" then
@@ -286,6 +302,7 @@ local function get_sqlite_handle()
         log_to_syslog("could not open the database", posix_syslog.LOG_CRIT)
         lclip_exit(1)
     end
+    set_db_permissions(tmp_db_name)
 
     local tmp_db_file = io.open(db_file_name, "w")
     local stdout = io.output()
@@ -299,7 +316,8 @@ end
 
 --- The clipboard's main loop
 -- @param clip_hist_size number of entries limit for the clip history file
-local function loop(clip_hist_size)
+-- @param detect_secrets_artgs args to pass to detect-secrets scan
+local function loop(clip_hist_size, detect_secrets_args)
     local sqlite_handle = get_sqlite_handle()
 
     -- create the table if it does not exist
@@ -340,7 +358,7 @@ local function loop(clip_hist_size)
         if clip_content == nil then goto continue end
         local insert_string = string.format(sql_insert, clip_content)
 
-        if detect_secrets(clip_content) then
+        if detect_secrets(clip_content, detect_secrets_args) then
             sqlite_handle:exec(insert_string)
         end
         if return_code ~= sqlite3.OK then
@@ -368,7 +386,8 @@ local function main()
     check_pid_file()
     write_pid_file()
     check_uid_gid()
-    local status, err = pcall(loop, args["hist_size"])
+    local status, err = pcall(loop, args["hist_size"],
+                              args["detect_secrets_args"])
     if status ~= true then log_to_syslog(err, posix_syslog.LOG_CRIT) end
 end
 
