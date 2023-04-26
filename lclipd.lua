@@ -7,6 +7,7 @@
 -- front-end example: sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
 local string = require("string")
 
+-- Adds the lua rocks modules to the require path for this script
 local function default_luarocks_modules()
     local luarocks_handle = io.popen("luarocks-5.3 path --bin")
     local path_b = false
@@ -46,20 +47,6 @@ create table if not exists lclipd (
 );
 ]=]
 
-local sql_dupe_trigger = [=[
-create trigger if not exists hist_dupe_prune before insert on lclipd
-begin
-    delete from lclipd
-    where id = (
-        select id
-        from lclipd as o
-        where (select count(id) from lclipd where content == o.content) > 1
-        order by id
-        limit 1
-    );
-end;
-]=]
-
 -- We are deleting old entries in groups of 20 instead of one by one
 local sql_old_reap_trigger = [=[
 create trigger if not exists hist_old_reap before insert on lclipd
@@ -67,7 +54,7 @@ begin
     delete from lclipd
     where id = (
         select id from lclipd
-        order by timeAdded
+        order by dateAdded
         asc
         limit 20
     ) and (
@@ -91,9 +78,6 @@ STR
 local tmp_dir = "/tmp/lclipd"
 local pid_file = "/tmp/lclipd/lclipd.pid"
 local db_file_name = "/tmp/lclipd/lclipd_db_name"
-
---- A sleep function
-local function sleep(n) os.execute("sleep " .. tonumber(n)) end
 
 --- We are not longer running.
 local function remove_pid_file() if wrote_a_pidfile then os.remove(pid_file) end end
@@ -237,6 +221,7 @@ local function detect_secrets(clipboard_content, detect_secrets_args)
         unistd.close(pipe_write)
         unistd._exit(0)
     elseif pid > 0 then -- parent
+        log_to_syslog("spawned " .. tostring(pid), posix_syslog.LOG_INFO)
         unistd.close(pipe_write)
         posix_wait.wait(pid)
         local result = unistd.read(pipe_read, 1)
@@ -262,7 +247,8 @@ local function get_clipboard_content()
     elseif pid == 0 then -- child
         os.execute("clipnotify")
         unistd._exit(0)
-    else -- parent
+    elseif pid > 0 then -- parent
+        log_to_syslog("spawned " .. tostring(pid), posix_syslog.LOG_INFO)
         -- clipnotify exits when there is a new entry on the clipboard
         -- so we do want a blocking call here
         posix_wait.wait(pid)
@@ -328,18 +314,9 @@ local function loop(clip_hist_size, detect_secrets_args)
         lclip_exit(1)
     end
 
-    -- add the de-dupe trigger
-    return_code = sqlite_handle:exec(sql_dupe_trigger)
-    if return_code ~= sqlite3.OK then
-        log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
-        log_to_syslog("could not add dupe trigger to table",
-                      posix_syslog.LOG_CRIT)
-        lclip_exit(1)
-    end
-
     -- add the old_reap trigger
     sql_old_reap_trigger = string.format(sql_old_reap_trigger, clip_hist_size)
-    return_code = sqlite_handle:exec(sql_dupe_trigger)
+    return_code = sqlite_handle:exec(sql_old_reap_trigger)
     if return_code ~= sqlite3.OK then
         log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
         log_to_syslog("could not add old_reap trigger to table",
@@ -350,10 +327,9 @@ local function loop(clip_hist_size, detect_secrets_args)
     log_to_syslog("starting the main loop", posix_syslog.LOG_INFO)
     while true do
         local clip_content = get_clipboard_content()
-        -- remove trailing/leading whitespace
         if clip_content == nil then goto continue end
+        -- remove trailing/leading whitespace
         clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
-        sleep(0.2)
 
         if clip_content == nil then goto continue end
         local insert_string = string.format(sql_insert, clip_content)
