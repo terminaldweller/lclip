@@ -4,11 +4,11 @@
 -- luarocks-5.3 install --local luaposix
 -- luarocks-5.3 install --local argparse
 -- luarocks-5.3 install --local lsqlite3
--- front-end example: sqlite3 $(cat /tmp/lclipd/lclipd_db_name) 'select content from lclipd;' | dmenu -l 10 | xsel -ib
+-- pipx install detect-secrets
 local string = require("string")
 
--- Adds the lua rocks modules to the require path for this script
-local function default_luarocks_modules()
+--- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
+local function add_luarocks_modules()
     local luarocks_handle = io.popen("luarocks-5.3 path --bin")
     local path_b = false
     local cpath_b = false
@@ -26,7 +26,7 @@ local function default_luarocks_modules()
     if path_b then os.exit(1) end
     if cpath_b then os.exit(1) end
 end
-default_luarocks_modules()
+add_luarocks_modules()
 
 -- we want to delete a pidfile if we wrote one, otherwise we won't
 local wrote_a_pidfile = false
@@ -38,6 +38,14 @@ local unistd = require("posix.unistd")
 local posix_syslog = require("posix.syslog")
 local sqlite3 = require("lsqlite3")
 local posix_wait = require("posix.sys.wait")
+local posix_socket = require("posix.sys.socket")
+local libgen = require("posix.libgen")
+
+-- vendored dependency
+-- https://github.com/rxi/json.lua
+local base_path = libgen.dirname(arg[0])
+package.path = package.path .. ";" .. base_path .. "/?.lua"
+local json = require("json")
 
 local sql_create_table = [=[
 create table if not exists lclipd (
@@ -70,19 +78,16 @@ insert into lclipd(content,dateAdded) values('%s', unixepoch());
 
 -- using a heredoc string without expansion bypasses the need for escaping
 local detect_secrets_cmd = [=[
-detect-secrets scan %s --string <<- STR | grep -v False
+detect-secrets scan %s --string <<- STR | grep True
 %s
 STR
 ]=]
 
 local tmp_dir = "/tmp/lclipd"
 local pid_file = "/tmp/lclipd/lclipd.pid"
-local db_file_name = "/tmp/lclipd/lclipd_db_name"
 
 --- We are not longer running.
 local function remove_pid_file() if wrote_a_pidfile then os.remove(pid_file) end end
-
---- Adds LUA_PATH and LUA_CPATH to the current interpreters path.
 
 local function lclip_exit(n)
     os.exit(n)
@@ -94,6 +99,8 @@ parser:option("-s --hist_size",
               "number of distinct entries for clipboard history", 200)
 parser:option("-d --detect_secrets_args",
               "options that will be passed to detect secrets", "")
+parser:option("-a --address", "address to bind to", "127.0.0.1")
+parser:option("-p --port", "port to bind to", 9999)
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -112,16 +119,6 @@ end
 local function check_uid_gid()
     log_to_syslog(tostring(unistd.getuid()) .. ":" .. tostring(unistd.getgid()),
                   posix_syslog.LOG_INFO)
-end
-
---- Change the permission to user read/write i.e. chmod 600
--- @param path to the database file whose permissions will be set
-local function set_db_permissions(db_path)
-    local ret = sys_stat.chmod(db_path, sys_stat.S_IRUSR | sys_stat.S_IWUSR)
-    if ret ~= 0 then
-        log_to_syslog(tostring(ret), posix_syslog.LOG_CRIT)
-        lclip_exit(1)
-    end
 end
 
 --- Creates the necessary dirs
@@ -210,12 +207,11 @@ local function detect_secrets(clipboard_content, detect_secrets_args)
         unistd.close(pipe_read)
         local cmd = string.format(detect_secrets_cmd, detect_secrets_args,
                                   clipboard_content)
-        local _, secrets_baseline_handle = pcall(io.popen, cmd)
-        local secrets_baseline = secrets_baseline_handle:read("*a")
-        if secrets_baseline == "" then
-            unistd.write(pipe_write, "1")
-        else
+        local ret = os.execute(cmd)
+        if ret == 0 then
             unistd.write(pipe_write, "0")
+        else
+            unistd.write(pipe_write, "1")
         end
 
         unistd.close(pipe_write)
@@ -258,6 +254,7 @@ local function get_clipboard_content()
         local _, handle_x = pcall(io.popen, "xsel -ob")
         if handle_x ~= nil then
             local last_clip_entry_x = handle_x:read("*a")
+            handle_x:close()
             if last_clip_entry_x ~= "" and last_clip_entry_x ~= nil then
                 return last_clip_entry_x
             end
@@ -266,6 +263,7 @@ local function get_clipboard_content()
         local _, handle_w = pcall(io.popen, "wl-paste")
         if handle_w ~= nil then
             local last_clip_entry_w = handle_w:read("*a")
+            handle_w:close()
             if last_clip_entry_w ~= "" and last_clip_entry_w ~= nil then
                 return last_clip_entry_w
             end
@@ -277,33 +275,122 @@ end
 
 --- Get the sqlite DB handle.
 local function get_sqlite_handle()
-    local tmp_db_name = "/tmp/" ..
-                            io.popen(
-                                "tr -dc A-Za-z0-9 </dev/urandom | head -c 17"):read(
-                                "*a")
-    log_to_syslog(tmp_db_name, posix_syslog.LOG_INFO)
-    local clipDB = sqlite3.open(tmp_db_name,
-                                sqlite3.OPEN_READWRITE + sqlite3.OPEN_CREATE)
+    local clipDB = sqlite3.open("/dev/shm/lclipd")
+    -- local clipDB = sqlite3.open("")
     if clipDB == nil then
         log_to_syslog("could not open the database", posix_syslog.LOG_CRIT)
         lclip_exit(1)
     end
-    set_db_permissions(tmp_db_name)
-
-    local tmp_db_file = io.open(db_file_name, "w")
-    local stdout = io.output()
-    io.output(tmp_db_file)
-    io.write(tmp_db_name .. "\n")
-    io.close(tmp_db_file)
-    io.output(stdout)
 
     return clipDB
+end
+
+--- Callback function to get the result when we receive a query from the socket
+local function server_query_callback(conn, columns, values, _)
+    local result_table = {}
+    for i = 1, columns do result_table[i] = values[i] end
+
+    local result_json = json.encode(result_table)
+
+    local bytes_sent, errmsg = posix_socket.send(conn, result_json)
+    if bytes_sent == nil then
+        log_to_syslog(errmsg, posix_syslog.LOG_WARNING)
+        unistd._exit(1)
+    end
+    return 0
+end
+
+--- Start the lclipd server
+-- @param bind_address
+-- @param bind_port
+local function run_server(bind_address, bind_port, sqlite_handle)
+    local server_pid, errmsg = unistd.fork()
+    if server_pid == nil then -- error
+        log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    elseif server_pid == 0 then -- child
+        log_to_syslog("server component forked", posix_syslog.LOG_INFO)
+        local sock, errmsg = posix_socket.socket(posix_socket.AF_INET,
+                                                 posix_socket.SOCK_STREAM, 0)
+        if sock == nil then
+            log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+            lclip_exit(1)
+        end
+
+        local ret, errmsg = posix_socket.bind(sock, {
+            port = bind_port,
+            addr = bind_address,
+            family = posix_socket.AF_INET,
+            socktype = posix_socket.SOCK_STREAM
+        })
+        if ret == nil then
+            log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+            lclip_exit(1)
+        end
+
+        ret, errmsg = posix_socket.listen(sock, posix_socket.SOMAXCONN)
+        if ret == nil then
+            log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+            lclip_exit(1)
+        end
+        log_to_syslog("listening on " .. bind_address .. ":" ..
+                          tostring(bind_port), posix_syslog.LOG_INFO)
+
+        while true do
+            local conn, conn_addr = posix_socket.accept(sock)
+            if conn == nil then
+                log_to_syslog(conn_addr, posix_syslog.LOG_CRIT)
+                lclip_exit(1)
+            end
+
+            -- we fork on every incoming connection
+            local pid, errmsg = unistd.fork() -- connection fork
+            if pid == nil then -- error
+                log_to_syslog(errmsg, posix_syslog.LOG_WARNING)
+            elseif pid == 0 then -- child
+                local msg = {}
+                log_to_syslog("forked on incoming connection",
+                              posix_syslog.LOG_INFO)
+                while true do
+                    local b = posix_socket.recv(conn, 2 ^ 14)
+                    if not b or #b == 0 then break end
+                    table.insert(msg, b)
+                end
+                if msg == nil then
+                    log_to_syslog(errmsg, posix_syslog.LOG_WARNING)
+                    unistd.close(conn)
+                    unistd._exit(1)
+                end
+                msg = table.concat(msg)
+                log_to_syslog(msg, posix_syslog.LOG_INFO)
+                local return_code = sqlite_handle:exec(msg,
+                                                       server_query_callback,
+                                                       conn)
+                if return_code ~= sqlite3.OK then
+                    log_to_syslog(tostring(return_code),
+                                  posix_syslog.LOG_WARNING)
+                    unistd.close(conn)
+                    unistd._exit(1)
+                end
+                unistd.close(conn)
+                unistd._exit(0)
+                -- nothing to do for the parent here, we want the parent to return
+                -- and wait on accept for a new incoming connection
+            end
+            unistd.close(conn)
+        end
+    elseif server_pid > 0 then -- parent
+        -- the parent process can just return at this point
+        -- we are simply achieving asynchronicity with this
+        -- for the server component
+        return
+    end
 end
 
 --- The clipboard's main loop
 -- @param clip_hist_size number of entries limit for the clip history file
 -- @param detect_secrets_artgs args to pass to detect-secrets scan
-local function loop(clip_hist_size, detect_secrets_args)
+local function loop(args)
     local sqlite_handle = get_sqlite_handle()
 
     -- create the table if it does not exist
@@ -315,7 +402,8 @@ local function loop(clip_hist_size, detect_secrets_args)
     end
 
     -- add the old_reap trigger
-    sql_old_reap_trigger = string.format(sql_old_reap_trigger, clip_hist_size)
+    sql_old_reap_trigger =
+        string.format(sql_old_reap_trigger, args["hist_size"])
     return_code = sqlite_handle:exec(sql_old_reap_trigger)
     if return_code ~= sqlite3.OK then
         log_to_syslog(tostring(return_code), posix_syslog.LOG_CRIT)
@@ -323,6 +411,9 @@ local function loop(clip_hist_size, detect_secrets_args)
                       posix_syslog.LOG_CRIT)
         lclip_exit(1)
     end
+
+    -- fork the server component and give control back to the clipboard
+    run_server(args["address"], args["port"], sqlite_handle)
 
     log_to_syslog("starting the main loop", posix_syslog.LOG_INFO)
     while true do
@@ -334,11 +425,11 @@ local function loop(clip_hist_size, detect_secrets_args)
         if clip_content == nil then goto continue end
         local insert_string = string.format(sql_insert, clip_content)
 
-        if detect_secrets(clip_content, detect_secrets_args) then
-            sqlite_handle:exec(insert_string)
-        end
-        if return_code ~= sqlite3.OK then
-            log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
+        if detect_secrets(clip_content, args["detect_secrets_args"]) then
+            return_code = sqlite_handle:exec(insert_string)
+            if return_code ~= sqlite3.OK then
+                log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
+            end
         end
         ::continue::
     end
@@ -356,14 +447,19 @@ local function main()
         io.write("\n")
         os.exit(128 + signum)
     end)
+    -- we reap dead processes so we dont end up with zombies all over.
+    -- in our case, we dont really care how a child is terminated as
+    -- long as it terminates.
+    -- signal.signal(signal.SIGCHILD, function(_)
+    --     while posix_wait.wait(-1, posix_wait.WNOHANG) > 0 do end
+    -- end)
 
     make_tmp_dirs()
     local args = parser:parse()
     check_pid_file()
     write_pid_file()
     check_uid_gid()
-    local status, err = pcall(loop, args["hist_size"],
-                              args["detect_secrets_args"])
+    local status, err = pcall(loop, args)
     if status ~= true then log_to_syslog(err, posix_syslog.LOG_CRIT) end
 end
 
