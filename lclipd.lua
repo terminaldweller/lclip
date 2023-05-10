@@ -89,6 +89,8 @@ local pid_file = "/tmp/lclipd/lclipd.pid"
 --- We are not longer running.
 local function remove_pid_file() if wrote_a_pidfile then os.remove(pid_file) end end
 
+--- exits lclipd, effectively killing all children
+-- @param n the exit status code
 local function lclip_exit(n)
     os.exit(n)
     remove_pid_file()
@@ -116,6 +118,8 @@ local function log_to_syslog(log_str, log_priority)
     posix_syslog.closelog()
 end
 
+--- checks the uid and gid to make sure that we are the same id as the one
+-- that created the db
 local function check_uid_gid()
     log_to_syslog(tostring(unistd.getuid()) .. ":" .. tostring(unistd.getgid()),
                   posix_syslog.LOG_INFO)
@@ -145,7 +149,7 @@ end
 --- Tries to determine whether another instance is running, if yes, quits
 -- obvisouly doing it like this is imprecise but the chances of it failing
 -- are very low unless we have a constant known way of calling the script
--- so that we can match for that  exactly for the procfs cmdline check.
+-- so that we can match for that exactly in the procfs cmdline check.
 local function check_pid_file()
     local f = sys_stat.stat(pid_file)
     if f ~= nil then
@@ -276,7 +280,6 @@ end
 --- Get the sqlite DB handle.
 local function get_sqlite_handle()
     local clipDB = sqlite3.open("/dev/shm/lclipd")
-    -- local clipDB = sqlite3.open("")
     if clipDB == nil then
         log_to_syslog("could not open the database", posix_syslog.LOG_CRIT)
         lclip_exit(1)
@@ -285,7 +288,10 @@ local function get_sqlite_handle()
     return clipDB
 end
 
---- Callback function to get the result when we receive a query from the socket
+--- Callback function to get the result when we receive a query from the TCP port
+-- @param conn current TCP connection that we will reply to
+-- @param columns the columns of the query
+-- @param values the value of the query
 local function server_query_callback(conn, columns, values, _)
     local result_table = {}
     for i = 1, columns do result_table[i] = values[i] end
@@ -300,10 +306,10 @@ local function server_query_callback(conn, columns, values, _)
     return 0
 end
 
---- Start the lclipd server
--- @param bind_address
--- @param bind_port
-local function run_server(bind_address, bind_port, sqlite_handle)
+--- Starts the lclipd server in a separate process
+-- @param args cli args
+-- @param sqlite_handle db handle
+local function run_server(args, sqlite_handle)
     local server_pid, errmsg = unistd.fork()
     if server_pid == nil then -- error
         log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
@@ -318,8 +324,8 @@ local function run_server(bind_address, bind_port, sqlite_handle)
         end
 
         local ret, errmsg = posix_socket.bind(sock, {
-            port = bind_port,
-            addr = bind_address,
+            port = args["port"],
+            addr = args["address"],
             family = posix_socket.AF_INET,
             socktype = posix_socket.SOCK_STREAM
         })
@@ -333,14 +339,14 @@ local function run_server(bind_address, bind_port, sqlite_handle)
             log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
             lclip_exit(1)
         end
-        log_to_syslog("listening on " .. bind_address .. ":" ..
-                          tostring(bind_port), posix_syslog.LOG_INFO)
+        log_to_syslog("listening on " .. args["address"] .. ":" ..
+                          tostring(args["port"]), posix_syslog.LOG_INFO)
 
         while true do
             local conn, conn_addr = posix_socket.accept(sock)
             if conn == nil then
                 log_to_syslog(conn_addr, posix_syslog.LOG_CRIT)
-                lclip_exit(1)
+                goto server_continue
             end
 
             -- we fork on every incoming connection
@@ -378,6 +384,7 @@ local function run_server(bind_address, bind_port, sqlite_handle)
                 -- and wait on accept for a new incoming connection
             end
             unistd.close(conn)
+            ::server_continue::
         end
     elseif server_pid > 0 then -- parent
         -- the parent process can just return at this point
@@ -387,9 +394,50 @@ local function run_server(bind_address, bind_port, sqlite_handle)
     end
 end
 
+--- handles writing of the clipboard
+-- @pram args the cli args
+-- @pram sqlite_handle db handle
+local function clipboard_writer(args, sqlite_handle)
+    local server_pid, errmsg = unistd.fork()
+    if server_pid == nil then -- error
+        log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    elseif server_pid == 0 then
+        local return_code
+        while true do
+            local clip_content = get_clipboard_content()
+            if clip_content == nil then goto continue end
+            -- remove trailing/leading whitespace
+            clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
+
+            if clip_content == nil then goto continue end
+            local insert_string = string.format(sql_insert, clip_content)
+
+            local cpid, errmsg = unistd.fork()
+            if cpid == nil then -- error
+                log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+                lclip_exit(1)
+            elseif cpid == 0 then -- child
+                if detect_secrets(clip_content, args["detect_secrets_args"]) then
+                    return_code = sqlite_handle:exec(insert_string)
+                    if return_code ~= sqlite3.OK then
+                        log_to_syslog(tostring(return_code),
+                                      posix_syslog.LOG_WARNING)
+                    end
+                end
+                unistd._exit(0)
+                -- parent should just return to wait on the next
+                -- incoming event from clipnotify
+            end
+            ::continue::
+        end
+    elseif server_pid > 0 then
+        return
+    end
+end
+
 --- The clipboard's main loop
--- @param clip_hist_size number of entries limit for the clip history file
--- @param detect_secrets_artgs args to pass to detect-secrets scan
+-- @param args the cli args
 local function loop(args)
     local sqlite_handle = get_sqlite_handle()
 
@@ -412,26 +460,15 @@ local function loop(args)
         lclip_exit(1)
     end
 
-    -- fork the server component and give control back to the clipboard
-    run_server(args["address"], args["port"], sqlite_handle)
+    -- run the server process
+    run_server(args, sqlite_handle)
 
-    log_to_syslog("starting the main loop", posix_syslog.LOG_INFO)
+    -- run the clipboard writer process
+    clipboard_writer(args, sqlite_handle)
+
     while true do
-        local clip_content = get_clipboard_content()
-        if clip_content == nil then goto continue end
-        -- remove trailing/leading whitespace
-        clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
-
-        if clip_content == nil then goto continue end
-        local insert_string = string.format(sql_insert, clip_content)
-
-        if detect_secrets(clip_content, args["detect_secrets_args"]) then
-            return_code = sqlite_handle:exec(insert_string)
-            if return_code ~= sqlite3.OK then
-                log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
-            end
-        end
-        ::continue::
+        local pid = posix_wait.wait(-1)
+        while pid do pid = posix_wait.wait(-1) end
     end
 end
 
@@ -447,15 +484,13 @@ local function main()
         io.write("\n")
         os.exit(128 + signum)
     end)
-    -- we reap dead processes so we dont end up with zombies all over.
-    -- in our case, we dont really care how a child is terminated as
-    -- long as it terminates.
-    -- signal.signal(signal.SIGCHILD, function(_)
-    --     while posix_wait.wait(-1, posix_wait.WNOHANG) > 0 do end
-    -- end)
+    signal.signal(signal.SIGCHLD, function()
+        local pid = posix_wait.wait(-1)
+        while pid do pid = posix_wait.wait(-1) end
+    end)
 
-    make_tmp_dirs()
     local args = parser:parse()
+    make_tmp_dirs()
     check_pid_file()
     write_pid_file()
     check_uid_gid()
