@@ -76,9 +76,11 @@ local sql_insert = [=[
 insert into lclipd(content,dateAdded) values('%s', unixepoch());
 ]=]
 
--- using a heredoc string without expansion bypasses the need for escaping
+-- the shell command used to call detect-secrets.
+-- we are using a heredoc string without expansion to bypass the
+-- need for escaping.
 local detect_secrets_cmd = [=[
-detect-secrets scan %s --string <<- STR | grep True
+%s scan %s --string <<- STR | grep True
 %s
 STR
 ]=]
@@ -99,10 +101,24 @@ end
 local parser = argparse()
 parser:option("-s --hist_size",
               "number of distinct entries for clipboard history", 200)
+parser:option("-e --detect_secrets_exe",
+              "the command used to call detect-secrets", "detect-secrets")
 parser:option("-d --detect_secrets_args",
               "options that will be passed to detect secrets", "")
 parser:option("-a --address", "address to bind to", "127.0.0.1")
 parser:option("-p --port", "port to bind to", 9999)
+parser:option("-c --custom_clip_command", "custom clipboard read command", "")
+parser:option("--x_clip_cmd", "the command used to get the X clipboard content",
+              "xsel -ob")
+parser:option("--wayland_clip_cmd",
+              "the command used to get the wayland clipboard content",
+              "wl-paste")
+parser:option("--tmux_clip_cmd",
+              "the command used to get the tmux paste-buffer content",
+              "tmux show-buffer")
+parser:option("--db_path",
+              "path to the db location,currently :memory: and ''(empty) is not supported",
+              "/dev/shm/lclipd")
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -190,7 +206,7 @@ end
 -- returns true if the string is not a secret
 -- @param clipboard_content the content that will be checked against detect-secrets
 -- @param detect_secrets_arg extra args that will be passed to detect-secrets scan
-local function detect_secrets(clipboard_content, detect_secrets_args)
+local function detect_secrets(clipboard_content, args)
     if clipboard_content == nil or clipboard_content == "" then return false end
     local pipe_read, pipe_write = unistd.pipe()
     if pipe_read == nil then
@@ -209,8 +225,9 @@ local function detect_secrets(clipboard_content, detect_secrets_args)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
-        local cmd = string.format(detect_secrets_cmd, detect_secrets_args,
-                                  clipboard_content)
+        local cmd = string.format(detect_secrets_cmd,
+                                  args["detect_secrets_exe"],
+                                  args["detect_secrets_args"], clipboard_content)
         local ret = os.execute(cmd)
         if ret == 0 then
             unistd.write(pipe_write, "0")
@@ -235,7 +252,7 @@ local function detect_secrets(clipboard_content, detect_secrets_args)
 end
 
 --- Get the clipboard content from X or wayland.
-local function get_clipboard_content()
+local function get_clipboard_content(args)
     -- if we use a plain os.execute for clipnotify the parent wont get the
     -- SIGINT when it is passed.clipnotify will end up getting it.
     -- if we fork though, the parent receives the SIGINT just fine.
@@ -255,7 +272,8 @@ local function get_clipboard_content()
 
         -- we dont care whether all the calls to the different clipboard apps
         -- succeed or not so we just ignore the errors.
-        local _, handle_x = pcall(io.popen, "xsel -ob")
+        -- X
+        local _, handle_x = pcall(io.popen, args["x_clip_cmd"])
         if handle_x ~= nil then
             local last_clip_entry_x = handle_x:read("*a")
             handle_x:close()
@@ -264,7 +282,8 @@ local function get_clipboard_content()
             end
         end
 
-        local _, handle_w = pcall(io.popen, "wl-paste")
+        -- wayland
+        local _, handle_w = pcall(io.popen, args["wayland_clip_cmd"])
         if handle_w ~= nil then
             local last_clip_entry_w = handle_w:read("*a")
             handle_w:close()
@@ -273,13 +292,35 @@ local function get_clipboard_content()
             end
         end
 
+        -- tmux
+        local _, handle_t = pcall(io.popen, args["tmux_clip_cmd"])
+        if handle_t ~= nil then
+            local last_clip_entry_t = handle_t:read("*a")
+            handle_t:close()
+            if last_clip_entry_t ~= "" and last_clip_entry_t ~= nil then
+                return last_clip_entry_t
+            end
+        end
+
+        -- custom
+        if args["custom_clip_command"] ~= "" then
+            local _, handle_c = pcall(io.popen, args["custom_clip_command"])
+            if handle_c ~= nil then
+                local last_clip_entry_c = handle_c:read("*a")
+                handle_c:close()
+                if last_clip_entry_c ~= "" and last_clip_entry_c ~= nil then
+                    return last_clip_entry_c
+                end
+            end
+        end
+
         return nil
     end
 end
 
 --- Get the sqlite DB handle.
-local function get_sqlite_handle()
-    local clipDB = sqlite3.open("/dev/shm/lclipd")
+local function get_sqlite_handle(db_path)
+    local clipDB = sqlite3.open(db_path)
     if clipDB == nil then
         log_to_syslog("could not open the database", posix_syslog.LOG_CRIT)
         lclip_exit(1)
@@ -405,7 +446,7 @@ local function clipboard_writer(args, sqlite_handle)
     elseif server_pid == 0 then
         local return_code
         while true do
-            local clip_content = get_clipboard_content()
+            local clip_content = get_clipboard_content(args)
             if clip_content == nil then goto continue end
             -- remove trailing/leading whitespace
             clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
@@ -418,7 +459,7 @@ local function clipboard_writer(args, sqlite_handle)
                 log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
                 lclip_exit(1)
             elseif cpid == 0 then -- child
-                if detect_secrets(clip_content, args["detect_secrets_args"]) then
+                if detect_secrets(clip_content, args) then
                     return_code = sqlite_handle:exec(insert_string)
                     if return_code ~= sqlite3.OK then
                         log_to_syslog(tostring(return_code),
@@ -439,7 +480,7 @@ end
 --- The clipboard's main loop
 -- @param args the cli args
 local function loop(args)
-    local sqlite_handle = get_sqlite_handle()
+    local sqlite_handle = get_sqlite_handle(args["db_path"])
 
     -- create the table if it does not exist
     local return_code = sqlite_handle:exec(sql_create_table)
