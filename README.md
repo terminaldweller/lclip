@@ -78,7 +78,7 @@ Options:
                       -d <detect_secrets_args>,
    --detect_secrets_args <detect_secrets_args>
                          options that will be passed to detect secrets (default: )
-          -a <address>,  address to bind to (default: 127.0.0.1)
+          -a <address>,  address to bind to (default: ::)
    --address <address>
        -p <port>,        port to bind to
    --port <port>
@@ -106,4 +106,3 @@ lcilpd uses luaposix so any POSIX-half-compliant OS will do.</br>
 
 ## TODO
 * support `in-memory` and `temporary` databases.
-* add IPv6 support

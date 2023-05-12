@@ -60,7 +60,7 @@ local sql_old_reap_trigger = [=[
 create trigger if not exists hist_old_reap before insert on lclipd
 begin
     delete from lclipd
-    where id = (
+    where id in (
         select id from lclipd
         order by dateAdded
         asc
@@ -100,12 +100,12 @@ end
 
 local parser = argparse()
 parser:option("-s --hist_size",
-              "number of distinct entries for clipboard history", 200)
+              "number of distinct entries for clipboard history", 500)
 parser:option("-e --detect_secrets_exe",
               "the command used to call detect-secrets", "detect-secrets")
 parser:option("-d --detect_secrets_args",
               "options that will be passed to detect secrets", "")
-parser:option("-a --address", "address to bind to", "127.0.0.1")
+parser:option("-a --address", "address to bind to", "::")
 parser:option("-p --port", "port to bind to", 9999)
 parser:option("-c --custom_clip_command", "custom clipboard read command", "")
 parser:option("--x_clip_cmd", "the command used to get the X clipboard content",
@@ -357,17 +357,28 @@ local function run_server(args, sqlite_handle)
         lclip_exit(1)
     elseif server_pid == 0 then -- child
         log_to_syslog("server component forked", posix_syslog.LOG_INFO)
-        local sock, errmsg = posix_socket.socket(posix_socket.AF_INET,
+        local sock, errmsg = posix_socket.socket(posix_socket.AF_INET6,
                                                  posix_socket.SOCK_STREAM, 0)
         if sock == nil then
             log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
             lclip_exit(1)
         end
 
-        local ret, errmsg = posix_socket.bind(sock, {
+        -- the default on linux is to usually have this cleared but disabling
+        -- it is good manners
+        local ret = posix_socket.setsockopt(sock, posix_socket.IPPROTO_IPV6,
+                                            posix_socket.IPV6_V6ONLY, 0)
+
+        if ret ~= 0 then
+            log_to_syslog("could not clear IPV6 only flag",
+                          posix_syslog.LOG_CRIT)
+            lclip_exit(1)
+        end
+
+        ret, errmsg = posix_socket.bind(sock, {
             port = args["port"],
             addr = args["address"],
-            family = posix_socket.AF_INET,
+            family = posix_socket.AF_INET6,
             socktype = posix_socket.SOCK_STREAM
         })
         if ret == nil then
@@ -450,6 +461,8 @@ local function clipboard_writer(args, sqlite_handle)
             if clip_content == nil then goto continue end
             -- remove trailing/leading whitespace
             clip_content = string.gsub(clip_content, '^%s*(.-)%s*$', '%1')
+            -- escaping single quote characters
+            clip_content = string.gsub(clip_content, '\'', '\'\'')
 
             if clip_content == nil then goto continue end
             local insert_string = string.format(sql_insert, clip_content)
