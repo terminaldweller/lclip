@@ -77,12 +77,12 @@ insert into lclipd(content,dateAdded) values('%s', unixepoch());
 ]=]
 
 -- the shell command used to call detect-secrets.
--- we are using a heredoc string without expansion to bypass the
+-- we are using a quoted heredoc string without expansion to bypass the
 -- need for escaping.
 local detect_secrets_cmd = [=[
-%s scan %s --string <<- STR | grep True
+%s scan %s --string <<- '%s' | grep True
 %s
-STR
+%s
 ]=]
 
 local tmp_dir = "/tmp/lclipd"
@@ -202,6 +202,14 @@ local function write_pid_file()
     wrote_a_pidfile = true
 end
 
+--- generates a random string
+-- @param n the length of the random string
+local function get_random_str(n)
+    local result = ""
+    for _ = 1, n do result = result .. string.char(math.random(65, 65 + 25)) end
+    return result
+end
+
 --- Runs secret detection tests
 -- returns true if the string is not a secret
 -- @param clipboard_content the content that will be checked against detect-secrets
@@ -225,11 +233,19 @@ local function detect_secrets(clipboard_content, args)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
+        -- we need to use a random string that changes every time for 
+        -- the heredoc name so that we dont run the risk of having the name
+        -- of the heredoc appear in the clipboard content.
+        -- we need to change the name every time to not end up with a 
+        -- heredoc-ception scenario.
+        local random_str = get_random_str(15)
         local cmd = string.format(detect_secrets_cmd,
                                   args["detect_secrets_exe"],
-                                  args["detect_secrets_args"], clipboard_content)
+                                  args["detect_secrets_args"], random_str,
+                                  clipboard_content, random_str)
+        -- returns true or nil
         local ret = os.execute(cmd)
-        if ret == 0 then
+        if ret then
             unistd.write(pipe_write, "0")
         else
             unistd.write(pipe_write, "1")
