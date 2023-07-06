@@ -119,6 +119,9 @@ parser:option("--tmux_clip_cmd",
 parser:option("--db_path",
               "path to the db location,currently :memory: and ''(empty) is not supported",
               "/dev/shm/lclipd")
+parser:option("--sql_file",
+              "path to the file containing a sql file that will be executed about lclip starting every time",
+              "")
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -226,17 +229,17 @@ local function detect_secrets(clipboard_content, args)
     local pid, errmsg = unistd.fork()
 
     if pid == nil then -- error
-        unistd.closr(pipe_read)
-        unistd.closr(pipe_write)
+        unistd.close(pipe_read)
+        unistd.close(pipe_write)
         log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
         log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
         lclip_exit(1)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
-        -- we need to use a random string that changes every time for 
+        -- we need to use a random string that changes every time for
         -- the heredoc name so that we dont run the risk of having the name
         -- of the heredoc appear in the clipboard content.
-        -- we need to change the name every time to not end up with a 
+        -- we need to change the name every time to not end up with a
         -- heredoc-ception scenario.
         local random_str = get_random_str(15)
         local cmd = string.format(detect_secrets_cmd,
@@ -506,6 +509,19 @@ local function clipboard_writer(args, sqlite_handle)
     end
 end
 
+local function add_triggers_from_file(args, sqlite_handle)
+    local trigger_file = io.open(args["sql_file"], "r")
+    if not trigger_file then return end
+    local content = trigger_file:read("*a")
+    trigger_file:close()
+
+    local return_code = sqlite_handle:exec(content)
+    if return_code ~= sqlite3.OK then
+        log_to_syslog("error executing sql file:", posix_syslog.LOG_WARNING)
+        log_to_syslog(tostring(return_code), posix_syslog.LOG_WARNING)
+    end
+end
+
 --- The clipboard's main loop
 -- @param args the cli args
 local function loop(args)
@@ -529,6 +545,8 @@ local function loop(args)
                       posix_syslog.LOG_CRIT)
         lclip_exit(1)
     end
+
+    add_triggers_from_file(args, sqlite_handle)
 
     -- run the server process
     run_server(args, sqlite_handle)

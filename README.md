@@ -54,9 +54,23 @@ fzf_lclipd() {
   fi
 }
 zle -N fzf_lclipd
-bindkey '' fzf_lclipd
+bindkey '^O' fzf_lclipd
 ```
 You can also put the db on a network share and then have different instanecs on different hosts use the same common db, effectively sharing your clipboard between different devices on the same subnet.</br>
+
+
+You can run lclipd as a user service. The author uses this for runit:</br>
+```sh
+#!/bin/sh
+exec \
+  env \
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" \
+  XAUTHORITY="${XAUTHORITY}" \
+  DISPLAY=:0 \
+  /usr/bin/lua5.3 \
+  /home/devi/devi/lclip.git/in_memory/lclipd.lua \
+  > /dev/null 2>&1
+```
 
 ## Options
 
@@ -66,6 +80,7 @@ Usage: ./lclipd.lua [-h] [-s <hist_size>] [-e <detect_secrets_exe>]
        [-c <custom_clip_command>] [--x_clip_cmd <x_clip_cmd>]
        [--wayland_clip_cmd <wayland_clip_cmd>]
        [--tmux_clip_cmd <tmux_clip_cmd>] [--db_path <db_path>]
+       [--sql_file <sql_file>]
 
 Options:
    -h, --help            Show this help message and exit.
@@ -92,6 +107,7 @@ Options:
    --tmux_clip_cmd <tmux_clip_cmd>
                          the command used to get the tmux paste-buffer content (default: tmux show-buffer)
    --db_path <db_path>   path to the db location,currently :memory: and ''(empty) is not supported (default: /dev/shm/lclipd)
+   --sql_file <sql_file> path to the file containing a sql file that will be executed about lclip starting every time (default: )
 ```
 
 ## Supported OSes
