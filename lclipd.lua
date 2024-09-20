@@ -4,6 +4,7 @@
 -- luarocks-5.3 install --local luaposix
 -- luarocks-5.3 install --local argparse
 -- luarocks-5.3 install --local lsqlite3
+-- luarocks-5.3 install --local http
 -- pipx install detect-secrets
 local string = require("string")
 
@@ -40,6 +41,7 @@ local sqlite3 = require("lsqlite3")
 local posix_wait = require("posix.sys.wait")
 local posix_socket = require("posix.sys.socket")
 local libgen = require("posix.libgen")
+local ollama = require("ollama")
 
 -- vendored dependency
 -- https://github.com/rxi/json.lua
@@ -122,6 +124,12 @@ parser:option("--db_path",
 parser:option("--sql_file",
               "path to the file containing a sql file that will be executed about lclip starting every time",
               "")
+parser:option("--ollama_endpoint",
+              "the endpoint to send the clipboard content to",
+              "http://127.0.0.1:11434/api/chat")
+parser:option("--ollama_model", "the model to use for the ollama endpoint",
+              "llama3.1")
+parser:option("--ollama_prompt", "the prompt to use for the ollama endpoint", "")
 
 --- Log the given string to syslog with the given priority.
 -- @param log_str the string passed to the logging facility
@@ -211,6 +219,48 @@ local function get_random_str(n)
     local result = ""
     for _ = 1, n do result = result .. string.char(math.random(65, 65 + 25)) end
     return result
+end
+
+--- Asks the ollama server whether we should keep the clipboard content
+local function ask_ollama(clipboard_content, args)
+    if clipboard_content == nil or clipboard_content == "" then return false end
+    local pipe_read, pipe_write = unistd.pipe()
+    if pipe_read == nil then
+        log_to_syslog("could not create pipe", posix_syslog.LOG_CRIT)
+        log_to_syslog(pipe_write, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    end
+
+    local pid, errmsg = unistd.fork()
+
+    if pid == nil then -- error
+        unistd.close(pipe_read)
+        unistd.close(pipe_write)
+        log_to_syslog("could not fork", posix_syslog.LOG_CRIT)
+        log_to_syslog(errmsg, posix_syslog.LOG_CRIT)
+        lclip_exit(1)
+    elseif pid == 0 then -- child
+        unistd.close(pipe_read)
+
+        local is_secert = ollama.ask_ollama(clipboard_content, 5)
+
+        if is_secert == true then
+            unistd.write(pipe_write, "0")
+        else
+            unistd.write(pipe_write, "1")
+        end
+    elseif pid > 0 then -- parent
+        log_to_syslog("spawned " .. tostring(pid), posix_syslog.LOG_INFO)
+        unistd.close(pipe_write)
+        posix_wait.wait(pid)
+        local result = unistd.read(pipe_read, 1)
+        unistd.close(pipe_read)
+        if result == "0" then
+            return false
+        else
+            return true
+        end
+    end
 end
 
 --- Runs secret detection tests
