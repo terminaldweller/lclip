@@ -4,8 +4,11 @@ local libgen = require("posix.libgen")
 local base_path = libgen.dirname(arg[0])
 package.path = package.path .. ";" .. base_path .. "/?.lua"
 local json = require("json")
+local cq = require("cqueues")
 
 local ollama = {}
+
+local loop = cq.new()
 
 function ollama.ollama_req(clipboard_content)
     local url = "http://172.17.0.1:11434/api/chat"
@@ -19,11 +22,12 @@ function ollama.ollama_req(clipboard_content)
             {content = clipboard_content, role = "user"}, {
                 content = [[
             a public key is not a secret.
-            a base64 encoded string is a not secret.
+            a private key is a secret.
             a private key is a seceret.
             an api key is a secret.
             a password is a secret.
             a token is a secret.
+            a key-value pair is a secret if the key contains the word 'password'or 'secret' or 'token' or 'key'.
             a long string of random characters is a secret.
             ]],
                 role = "assistant"
@@ -72,22 +76,32 @@ end
 function ollama.ask_ollama(clipboard_content, count)
     local true_count = 0
     local false_count = 0
-
-    for _ = 1, count do
-        local result = ollama.ollama_req(clipboard_content)
-        local result_decoded = json.decode(result)
-        local final_result = json.decode(result_decoded["message"]["content"])
-        if final_result == true then
-            true_count = true_count + 1
-        else
-            false_count = false_count + 1
+    loop:wrap(function()
+        for _ = 1, count do
+            loop:wrap(function()
+                local result = ollama.ollama_req(clipboard_content)
+                local result_decoded = json.decode(result)
+                local final_result = json.decode(
+                                         result_decoded["message"]["content"])
+                for k, v in pairs(final_result) do print(k, v) end
+                if final_result["isSecret"] == true then
+                    true_count = true_count + 1
+                else
+                    false_count = false_count + 1
+                end
+                print("True count: " .. true_count)
+                print("False count: " .. false_count)
+            end)
         end
-    end
+    end)
+    loop:loop()
 
-    if true_count > false_count then
-        return true
-    else
+    print("True count: " .. true_count)
+    print("False count: " .. false_count)
+    if false_count > true_count then
         return false
+    else
+        return true
     end
 end
 
