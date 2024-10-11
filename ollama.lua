@@ -21,14 +21,20 @@ function ollama.ollama_req(clipboard_content)
         messages = {
             {content = clipboard_content, role = "user"}, {
                 content = [[
-            a public key is not a secret.
-            a private key is a secret.
-            a private key is a seceret.
+            Learn the following rules. the rules are provided in no particular order:
+            ---
+            a public key of an assymetric key-pair is a secret.
+            a private key of an assymetric key-pair is a secret.
             an api key is a secret.
             a password is a secret.
-            a token is a secret.
+            a token used for authentication or authorization is a secret.
             a key-value pair is a secret if the key contains the word 'password'or 'secret' or 'token' or 'key'.
+            a string containing the word 'password' or 'secret' or 'token' or 'key' is a secret.
+            a string that contains a word longer than 20 characters is a secret.
+            a word that is not part of any of the languages you know which is longer than 20 characters is a secret.
             a long string of random characters is a secret.
+            one matching positive matching criteria is enough to consider a string a secret.
+            ---
             ]],
                 role = "assistant"
             }, {
@@ -38,6 +44,8 @@ function ollama.ollama_req(clipboard_content)
                 The answer must have a field named 'reasoning'.
                 The value of 'isSecret' must be a boolean.
                 The value of reasoning must be a string.
+                You must give a reason.
+                The reason must be the criteria that was used to determine if the string is a secret.
                 The answer must be valid json.
                 ]],
                 role = "assistant"
