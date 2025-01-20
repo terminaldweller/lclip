@@ -10,12 +10,12 @@ local ollama = {}
 
 local loop = cq.new()
 
-function ollama.ollama_req(clipboard_content)
-    local url = "http://172.17.0.1:11434/api/chat"
+function ollama.ollama_req(clipboard_content, args)
+    local url = args["ollama_endpoint"]
     local req = http_request.new_from_uri(url)
 
     local body = {
-        model = "llama3.1",
+        model = args["ollama_model"],
         stream = false,
         format = "json",
         messages = {
@@ -39,7 +39,7 @@ function ollama.ollama_req(clipboard_content)
                 role = "assistant"
             }, {
                 content = [[
-                Only answer in json. 
+                Only answer in json.
                 The answer must a field named 'isSecret'.
                 The answer must have a field named 'reasoning'.
                 The value of 'isSecret' must be a boolean.
@@ -52,7 +52,7 @@ function ollama.ollama_req(clipboard_content)
             }, {
                 content = [[
                 Now I will give you your task.
-                Look at the user-provided string content. 
+                Look at the user-provided string content.
                 Is it a secret? answer in json.
                 ]],
                 role = "assistant"
@@ -81,13 +81,13 @@ function ollama.ollama_req(clipboard_content)
     return result_body
 end
 
-function ollama.ask_ollama(clipboard_content, count)
+function ollama.ask_ollama(clipboard_content, args, count)
     local true_count = 0
     local false_count = 0
     loop:wrap(function()
         for _ = 1, count do
             loop:wrap(function()
-                local result = ollama.ollama_req(clipboard_content)
+                local result = ollama.ollama_req(clipboard_content, args)
                 local result_decoded = json.decode(result)
                 local final_result = json.decode(
                                          result_decoded["message"]["content"])

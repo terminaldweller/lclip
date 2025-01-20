@@ -107,7 +107,7 @@ parser:option("-e --detect_secrets_exe",
               "the command used to call detect-secrets", "detect-secrets")
 parser:option("-d --detect_secrets_args",
               "options that will be passed to detect secrets", "")
-parser:option("-a --address", "address to bind to", "::")
+parser:option("-a --address", "address to bind to", "::1")
 parser:option("-p --port", "port to bind to", 9999)
 parser:option("-c --custom_clip_command", "custom clipboard read command", "")
 parser:option("--x_clip_cmd", "the command used to get the X clipboard content",
@@ -126,7 +126,7 @@ parser:option("--sql_file",
               "")
 parser:option("--ollama_endpoint",
               "the endpoint to send the clipboard content to",
-              "http://127.0.0.1:11434/api/chat")
+              "http://172.17.0.1:11434/api/chat")
 parser:option("--ollama_model", "the model to use for the ollama endpoint",
               "llama3.1")
 parser:option("--ollama_prompt", "the prompt to use for the ollama endpoint", "")
@@ -242,7 +242,7 @@ local function ask_ollama(clipboard_content, args)
     elseif pid == 0 then -- child
         unistd.close(pipe_read)
 
-        local is_secert = ollama.ask_ollama(clipboard_content, 5)
+        local is_secert = ollama.ask_ollama(clipboard_content, args, 5)
 
         if is_secert == true then
             unistd.write(pipe_write, "0")
