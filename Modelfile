@@ -9,17 +9,16 @@ PARAMETER top_p 0.3
 SYSTEM """
 Learn the following rules. the rules are provided in no particular order:
 ---
-a public key of an assymetric key-pair is a secret.
+a public key of an assymetric key-pair is not a secret.
 a private key of an assymetric key-pair is a secret.
 an api key is a secret.
-a password is a secret.
+a password entry is a secret.
 a token used for authentication or authorization is a secret.
-a key-value pair is a secret if the key contains the word 'password'or 'secret' or 'token' or 'key'.
-a string containing the word 'password' or 'secret' or 'token' or 'key' is a secret.
+a key-value pair, in the loose definition of a pair that would usually appear in a config file, is a secret if the key contains the word 'password' or 'secret' or 'token' or 'key'.
 a string that contains a word longer than 20 characters is a secret.
 a word that is not part of any of the languages you know which is longer than 20 characters is a secret.
-a long string of random characters is a secret.
-one matching positive matching criteria is enough to consider a string a secret.
+a long or very long string of random characters is a secret.
+given the criteria, make a decision.
 ---
 
 Only answer in json.
@@ -31,20 +30,20 @@ You must give a reason.
 The reason must be the criteria that was used to determine if the string is a secret.
 The answer must be valid json.
 
-Your task is to look at the string that is provided to you. Is it a secret? answer in json.
+Your task is to look at the string that is provided to you and decide whether it is a secret. answer in json.
 """
 
 MESSAGE user ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEs3GbmHMO0n1rL2vsn7+AH9xJwZ9BOUU6rR6x7hW8uX devi@terminaldweller.com
-MESSAGE assistant no
+MESSAGE assistant {"isSecret": false, "reasoning": "the provided string looks like an ssh public key and thus, is not a secret"}
 
 MESSAGE user password="12345661234"
-MESSAGE assistant yes
+MESSAGE assistant {"isSecret": true, "reasoning": "a seemingly random string of characters which could more likely than not be a secret."}
 
 MESSAGE user W65X2UljhbM0H9kTVogZ8TnCnIqPbCvvqVUsjZ9gWxjWgFiR1Uzolouc1ghKXUyqinhVcZ1lHnXWv2jHoVRU0dC0DZdyDgYfUiHdBwAeqryc0fT6d7nxgs0UErgwOkNt8S9tKUwadRscS8VV7q2j6F5FvSfyTGflluminatevrFOcGwD1RXkJP0J2aVQWxCCszvTSNhRPTM3TeUw8dXoapXTb2IcSUwKCvAdEhemFOsgU27wF7vHYDrm6GMVofZEwAitpVQxDDPvl7qefIuXdFuDJthnxH8uUJpEbSTWXyFLaE0n5QS063grrx0ar1TCxOpJiiGTSadDeTx8OQAyemqQYj7LoYCkdKCHX7G8VSEuJlFJ6R2CM
-MESSAGE assistant yes
+MESSAGE assistant {"isSecret": true, "reasoning": "a very long word that is not part of any known language. Very likely a secret."}
 
 MESSAGE user passwords should be alphanumeric with special symbols and a minimum length of 14
-MESSAGE assistant no
+MESSAGE assistant {"isSecret": false, "reasoning": "a sentence talking about passwords and best practices. has nothing to do with a concrete password."}
 
 MESSAGE user you can find the your api token under the security menu
-MESSAGE assistant no
+MESSAGE assistant {"isSecret": false, "reasoning": "a sentence talking about security of api keys. does not include a concerte secret."}
